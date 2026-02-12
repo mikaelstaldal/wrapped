@@ -11,7 +11,7 @@ import (
 	"github.com/things-go/go-socks5"
 )
 
-// matchHost reports whether host (with optional port) matches any of the allowed hosts.
+// matchHost reports whether the host (with optional port) matches any of the allowed hosts.
 // Supports exact match ("example.com") and wildcard subdomain ("*.example.com").
 func matchHost(host string, allowedHosts []string) bool {
 	// Strip port if present.
@@ -57,7 +57,7 @@ func startHTTPProxy(allowedHosts []string) (int, func(), error) {
 	go server.Serve(listener)
 
 	closer := func() {
-		server.Close()
+		_ = server.Close()
 	}
 	return port, closer, nil
 }
@@ -81,7 +81,7 @@ func handleConnect(w http.ResponseWriter, r *http.Request, allowedHosts []string
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		target.Close()
+		_ = target.Close()
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
 		return
 	}
@@ -89,17 +89,17 @@ func handleConnect(w http.ResponseWriter, r *http.Request, allowedHosts []string
 	w.WriteHeader(http.StatusOK)
 	client, _, err := hijacker.Hijack()
 	if err != nil {
-		target.Close()
+		_ = target.Close()
 		return
 	}
 
 	go func() {
-		io.Copy(target, client)
-		target.Close()
+		_, _ = io.Copy(target, client)
+		_ = target.Close()
 	}()
 	go func() {
-		io.Copy(client, target)
-		client.Close()
+		_, _ = io.Copy(client, target)
+		_ = client.Close()
 	}()
 }
 
@@ -123,7 +123,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, allowedHosts []string) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // hostRuleSet implements socks5.RuleSet to filter connections by allowed hosts.
@@ -155,7 +155,7 @@ func startSOCKS5Proxy(allowedHosts []string) (int, func(), error) {
 	go server.Serve(listener)
 
 	closer := func() {
-		listener.Close()
+		_ = listener.Close()
 	}
 	return port, closer, nil
 }

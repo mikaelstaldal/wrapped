@@ -29,12 +29,15 @@ var envPassthrough = []string{
 	"USER",
 }
 
-func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
+func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
 	if len(allowedHosts) > 0 {
-		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor, allowedHosts)
+		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
+			extraEnv, workdir, apparmor, allowedHosts)
 	}
 
-	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor, nil)
+	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable,
+		mountReadonly, mountWritable, extraEnv, workdir, apparmor, nil)
 	if err != nil {
 		return err
 	}
@@ -49,7 +52,8 @@ func Wrapped(program string, arguments []string, network, mountCurrentDir, mount
 	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
 }
 
-func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
+func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
 	// Check socat is available.
 	if _, err := exec.LookPath("socat"); err != nil {
 		return fmt.Errorf("socat is required for --allow-host: %w", err)
@@ -96,7 +100,8 @@ func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountC
 		httpSock:  httpSock,
 		socksSock: socksSock,
 	}
-	bwrapArgs, err := buildBwrapArgs(program, arguments, false, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor, filterConfig)
+	bwrapArgs, err := buildBwrapArgs(program, arguments, false, mountCurrentDir, mountCurrentDirWritable,
+		mountReadonly, mountWritable, extraEnv, workdir, apparmor, filterConfig)
 	if err != nil {
 		return err
 	}
@@ -121,7 +126,7 @@ func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountC
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		for sig := range sigCh {
-			cmd.Process.Signal(sig)
+			_ = cmd.Process.Signal(sig)
 		}
 	}()
 
@@ -129,7 +134,8 @@ func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountC
 	signal.Stop(sigCh)
 
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			os.Exit(exitErr.ExitCode())
 		}
 		return fmt.Errorf("bwrap failed: %w", err)
@@ -172,7 +178,8 @@ func isParentOrEqual(parent, child string) bool {
 	return strings.HasPrefix(child, prefix)
 }
 
-func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filterCfg *filteredNetConfig) ([]string, error) {
+func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filterCfg *filteredNetConfig) ([]string, error) {
 	var args []string
 
 	args = append(args,
