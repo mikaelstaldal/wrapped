@@ -5,9 +5,8 @@ Run a program in a sandbox using [bubblewrap](https://github.com/containers/bubb
 ## Inspiration
 
 The network sandboxing is inspired by [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime). 
-Although it is quite inconvenient for a general sandboxing tool to be implemented in 
-TypeScript and require a JavaScript runtime. So this program is implemented in Go and can produce a standalone statically 
-linked binary.
+Although it is quite inconvenient for a general sandboxing tool to be implemented in TypeScript and require a JavaScript runtime. 
+So this program is implemented in Go and can produce a standalone statically linked binary.
 
 ## Prerequisites
 
@@ -45,7 +44,7 @@ wrapped [flags] -- program [arguments...]
 
 ### Examples
 
-Run a program with no network and no access to the filesystem (beyond `/usr` and `/etc`):
+Run a program with no network and no access to the filesystem (beyond read-only access to system directories like `/usr` and `/etc`):
 ```bash
 wrapped program arg1 arg2
 ```
