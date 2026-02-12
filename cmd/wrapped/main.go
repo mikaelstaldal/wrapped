@@ -19,6 +19,7 @@ func main() {
 		envFlags           []string
 		workdir            string
 		apparmor           string
+		allowedHosts       []string
 	)
 
 	rootCmd := &cobra.Command{
@@ -39,6 +40,7 @@ func main() {
 				envFlags,
 				workdir,
 				apparmor,
+				allowedHosts,
 			)
 		},
 	}
@@ -52,8 +54,10 @@ func main() {
 	f.StringArrayVarP(&envFlags, "env", "e", nil, "Pass environment variable")
 	f.StringVarP(&workdir, "workdir", "w", "", "Working directory")
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
+	f.StringArrayVar(&allowedHosts, "allow-host", nil, "Allow network access to specific host (can be repeated, supports *.example.com wildcards)")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
+	rootCmd.MarkFlagsMutuallyExclusive("network", "allow-host")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

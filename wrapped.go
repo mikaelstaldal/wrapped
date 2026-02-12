@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -28,8 +29,12 @@ var envPassthrough = []string{
 	"USER",
 }
 
-func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) error {
-	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor)
+func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
+	if len(allowedHosts) > 0 {
+		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor, allowedHosts)
+	}
+
+	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor, nil)
 	if err != nil {
 		return err
 	}
@@ -42,6 +47,99 @@ func Wrapped(program string, arguments []string, network, mountCurrentDir, mount
 	argv := append([]string{"bwrap"}, bwrapArgs...)
 	// exec replaces the current process; if we reach the return, exec failed.
 	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
+}
+
+func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
+	// Check socat is available.
+	if _, err := exec.LookPath("socat"); err != nil {
+		return fmt.Errorf("socat is required for --allow-host: %w", err)
+	}
+
+	// Start proxy servers.
+	httpPort, httpClose, err := startHTTPProxy(allowedHosts)
+	if err != nil {
+		return fmt.Errorf("failed to start HTTP proxy: %w", err)
+	}
+	defer httpClose()
+
+	socksPort, socksClose, err := startSOCKS5Proxy(allowedHosts)
+	if err != nil {
+		return fmt.Errorf("failed to start SOCKS5 proxy: %w", err)
+	}
+	defer socksClose()
+
+	// Create temp Unix socket paths.
+	httpSock := fmt.Sprintf("/tmp/wrapped-http-%d.sock", os.Getpid())
+	socksSock := fmt.Sprintf("/tmp/wrapped-socks-%d.sock", os.Getpid())
+	defer os.Remove(httpSock)
+	defer os.Remove(socksSock)
+
+	// Start host-side socat bridges.
+	httpBridge := exec.Command("socat",
+		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", httpSock),
+		fmt.Sprintf("TCP:127.0.0.1:%d", httpPort))
+	if err := httpBridge.Start(); err != nil {
+		return fmt.Errorf("failed to start HTTP socat bridge: %w", err)
+	}
+	defer httpBridge.Process.Kill()
+
+	socksBridge := exec.Command("socat",
+		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socksSock),
+		fmt.Sprintf("TCP:127.0.0.1:%d", socksPort))
+	if err := socksBridge.Start(); err != nil {
+		return fmt.Errorf("failed to start SOCKS5 socat bridge: %w", err)
+	}
+	defer socksBridge.Process.Kill()
+
+	// Build bwrap args with filtered network config.
+	filterConfig := &filteredNetConfig{
+		httpSock:  httpSock,
+		socksSock: socksSock,
+	}
+	bwrapArgs, err := buildBwrapArgs(program, arguments, false, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor, filterConfig)
+	if err != nil {
+		return err
+	}
+
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	// Run bwrap as a child process.
+	cmd := exec.Command(bwrapPath, bwrapArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start bwrap: %w", err)
+	}
+
+	// Forward signals to the child.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range sigCh {
+			cmd.Process.Signal(sig)
+		}
+	}()
+
+	err = cmd.Wait()
+	signal.Stop(sigCh)
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return fmt.Errorf("bwrap failed: %w", err)
+	}
+	return nil
+}
+
+type filteredNetConfig struct {
+	httpSock  string
+	socksSock string
 }
 
 func resolveProgram(program string) (string, error) {
@@ -74,7 +172,7 @@ func isParentOrEqual(parent, child string) bool {
 	return strings.HasPrefix(child, prefix)
 }
 
-func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) ([]string, error) {
+func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filterCfg *filteredNetConfig) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -179,20 +277,62 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 		"--unshare-cgroup-try",
 	)
 
-	if network {
+	if filterCfg != nil {
+		// Filtered network: isolated network namespace with proxy access via Unix sockets.
+		args = append(args, "--unshare-net", "--unshare-uts")
+
+		// Bind-mount Unix sockets into the sandbox.
+		args = append(args, "--bind", filterCfg.httpSock, filterCfg.httpSock)
+		args = append(args, "--bind", filterCfg.socksSock, filterCfg.socksSock)
+
+		// Set proxy environment variables.
+		args = append(args,
+			"--setenv", "HTTP_PROXY", "http://localhost:3128",
+			"--setenv", "HTTPS_PROXY", "http://localhost:3128",
+			"--setenv", "http_proxy", "http://localhost:3128",
+			"--setenv", "https_proxy", "http://localhost:3128",
+			"--setenv", "ALL_PROXY", "socks5h://localhost:1080",
+			"--setenv", "all_proxy", "socks5h://localhost:1080",
+			"--setenv", "NO_PROXY", "localhost,127.0.0.1,::1",
+			"--setenv", "no_proxy", "localhost,127.0.0.1,::1",
+		)
+
+		// DNS: mount /run/systemd/resolve if present.
 		info, err := os.Stat(systemdResolve)
 		if err == nil && info.IsDir() {
 			args = append(args, "--ro-bind", systemdResolve, systemdResolve)
 		}
-	} else {
-		args = append(args, "--unshare-net", "--unshare-uts")
-	}
 
-	if apparmor != "" {
-		args = append(args, "aa-exec", "-p", apparmor, "--")
+		// Wrap the program invocation with socat bridges inside the sandbox.
+		shellCmd := fmt.Sprintf(
+			"socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
+				"socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
+				"exec ",
+			filterCfg.httpSock, filterCfg.socksSock)
+
+		if apparmor != "" {
+			shellCmd += fmt.Sprintf("aa-exec -p %s -- ", apparmor)
+		}
+		shellCmd += `"$0" "$@"`
+
+		args = append(args, "sh", "-c", shellCmd, resolvedProgram)
+		args = append(args, arguments...)
+	} else {
+		if network {
+			info, err := os.Stat(systemdResolve)
+			if err == nil && info.IsDir() {
+				args = append(args, "--ro-bind", systemdResolve, systemdResolve)
+			}
+		} else {
+			args = append(args, "--unshare-net", "--unshare-uts")
+		}
+
+		if apparmor != "" {
+			args = append(args, "aa-exec", "-p", apparmor, "--")
+		}
+		args = append(args, resolvedProgram)
+		args = append(args, arguments...)
 	}
-	args = append(args, resolvedProgram)
-	args = append(args, arguments...)
 
 	return args, nil
 }
