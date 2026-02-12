@@ -28,8 +28,8 @@ var envPassthrough = []string{
 	"USER",
 }
 
-func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir string) error {
-	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) error {
+	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, apparmor)
 	if err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func isParentOrEqual(parent, child string) bool {
 	return strings.HasPrefix(child, prefix)
 }
 
-func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir string) ([]string, error) {
+func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -188,6 +188,9 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 		args = append(args, "--unshare-net", "--unshare-uts")
 	}
 
+	if apparmor != "" {
+		args = append(args, "aa-exec", "-p", apparmor, "--")
+	}
 	args = append(args, resolvedProgram)
 	args = append(args, arguments...)
 

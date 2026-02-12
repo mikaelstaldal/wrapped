@@ -18,6 +18,7 @@ func main() {
 		mountsWritable     []string
 		envFlags           []string
 		workdir            string
+		apparmor           string
 	)
 
 	rootCmd := &cobra.Command{
@@ -37,6 +38,7 @@ func main() {
 				mountsWritable,
 				envFlags,
 				workdir,
+				apparmor,
 			)
 		},
 	}
@@ -49,6 +51,7 @@ func main() {
 	f.StringArrayVar(&mountsWritable, "mount-writable", nil, "Mount additional directory writable")
 	f.StringArrayVarP(&envFlags, "env", "e", nil, "Pass environment variable")
 	f.StringVarP(&workdir, "workdir", "w", "", "Working directory")
+	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 
