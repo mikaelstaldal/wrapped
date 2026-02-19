@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -185,7 +186,7 @@ func wrappedFiltered(program string, arguments []string, apparmor string, filter
 		return fmt.Errorf("socat is required for filtered network access: %w", err)
 	}
 
-	// Set up network logger if requested.
+	// Set up a network logger if requested.
 	var netLog *networkLogger
 	if networkLogFile != "" {
 		f, err := os.OpenFile(networkLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -224,7 +225,12 @@ func wrappedFiltered(program string, arguments []string, apparmor string, filter
 	if err := httpBridge.Start(); err != nil {
 		return fmt.Errorf("failed to start HTTP socat bridge: %w", err)
 	}
-	defer syscall.Kill(-httpBridge.Process.Pid, syscall.SIGKILL)
+	defer func(pid int) {
+		err := syscall.Kill(pid, syscall.SIGTERM)
+		if err != nil {
+			log.Printf("failed to kill socat: %v", err)
+		}
+	}(-httpBridge.Process.Pid)
 
 	socksBridge := exec.Command("socat",
 		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socksSock),
@@ -233,7 +239,12 @@ func wrappedFiltered(program string, arguments []string, apparmor string, filter
 	if err := socksBridge.Start(); err != nil {
 		return fmt.Errorf("failed to start SOCKS5 socat bridge: %w", err)
 	}
-	defer syscall.Kill(-socksBridge.Process.Pid, syscall.SIGKILL)
+	defer func(pid int) {
+		err := syscall.Kill(pid, syscall.SIGTERM)
+		if err != nil {
+			log.Printf("failed to kill socat: %v", err)
+		}
+	}(-socksBridge.Process.Pid)
 
 	// Build bwrap args.
 	bwrapPath, bwrapArgs, err := buildArgs(httpSock, socksSock)
@@ -242,8 +253,8 @@ func wrappedFiltered(program string, arguments []string, apparmor string, filter
 	}
 
 	// Build the shell command that runs inside the sandbox.
-	// Run socat bridges in background, then the program as a foreground child.
-	// When the program exits, kill the background socats and exit with the program's status.
+	// Run socat bridges in the background, then the program as a foreground child.
+	// When the program exits, kill the background socat processes and exit with the program's status.
 	shellCmd := fmt.Sprintf(
 		"socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
 			"socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & ",
@@ -372,7 +383,7 @@ func runWithPasta(bwrapPath string, bwrapArgs []string) error {
 	// Read child PID from info-fd.
 	var info bwrapInfoJSON
 	if err := json.NewDecoder(infoRead).Decode(&info); err != nil {
-		_ = cmd.Process.Kill()
+		_ = cmd.Process.Signal(syscall.SIGTERM)
 		_ = cmd.Wait()
 		return fmt.Errorf("failed to read bwrap info: %w", err)
 	}
@@ -384,7 +395,7 @@ func runWithPasta(bwrapPath string, bwrapArgs []string) error {
 	pastaCmd.Stdout = os.Stdout
 	pastaCmd.Stderr = os.Stderr
 	if err := pastaCmd.Run(); err != nil {
-		_ = cmd.Process.Kill()
+		_ = cmd.Process.Signal(syscall.SIGTERM)
 		_ = cmd.Wait()
 		return fmt.Errorf("failed to run pasta: %w", err)
 	}
