@@ -2,6 +2,7 @@
 package wrapped
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -38,11 +39,22 @@ var envPassthrough = []string{
 	"USER",
 }
 
-func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
+// Network mode constants for the networkMode parameter.
+const (
+	NetworkNone     = "none"
+	NetworkHost     = "host"
+	NetworkBridge   = "bridge"
+	NetworkFiltered = "filtered"
+)
+
+func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string,
 	allowAllHosts bool, deniedHosts []string, networkLogFile string, networkSandboxOnly bool) error {
 	if networkSandboxOnly {
 		// Validate incompatible flags.
+		if networkMode == NetworkHost {
+			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --network host")
+		}
 		if mountCurrentDir || mountCurrentDirWritable {
 			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --current-dir or --current-dir-writable")
 		}
@@ -59,34 +71,47 @@ func Wrapped(program string, arguments []string, network, mountCurrentDir, mount
 			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --env")
 		}
 
-		if len(allowedHosts) > 0 {
-			return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
-		}
-		if allowAllHosts {
-			return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
+		if networkMode == NetworkFiltered {
+			if len(allowedHosts) > 0 {
+				return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
+			}
+			if allowAllHosts {
+				return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
+			}
 		}
 
 		if networkLogFile != "" {
-			return fmt.Errorf("--network-log requires --allow-host or --allow-all-hosts")
+			return fmt.Errorf("--network-log requires --network filtered")
+		}
+
+		if networkMode == NetworkBridge {
+			return wrappedPastaNetworkOnly(program, arguments, apparmor)
 		}
 
 		return wrappedNetworkSandboxOnly(program, arguments, apparmor)
 	}
 
-	if len(allowedHosts) > 0 {
-		buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
-		return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildArgs)
+	if networkMode == NetworkBridge {
+		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
+			mountReadonly, mountWritable, extraEnv, workdir, apparmor)
 	}
-	if allowAllHosts {
-		buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
-		return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildArgs)
+
+	if networkMode == NetworkFiltered {
+		if len(allowedHosts) > 0 {
+			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+			return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildArgs)
+		}
+		if allowAllHosts {
+			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+			return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildArgs)
+		}
 	}
 
 	if networkLogFile != "" {
-		return fmt.Errorf("--network-log requires --allow-host or --allow-all-hosts")
+		return fmt.Errorf("--network-log requires --network filtered")
 	}
 
-	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable,
+	bwrapArgs, err := buildBwrapArgs(program, arguments, networkMode == NetworkHost, mountCurrentDir, mountCurrentDirWritable,
 		mountReadonly, mountWritable, extraEnv, workdir, apparmor)
 	if err != nil {
 		return err
@@ -296,6 +321,168 @@ func isParentOrEqual(parent, child string) bool {
 		prefix += "/"
 	}
 	return strings.HasPrefix(child, prefix)
+}
+
+// bwrapInfoJSON is the JSON structure written by bwrap to --info-fd.
+type bwrapInfoJSON struct {
+	ChildPID int `json:"child-pid"`
+}
+
+// runWithPasta runs bwrap as a child process with pasta providing network access.
+// It uses --info-fd to learn the child PID and --userns-block-fd to pause the child
+// while pasta sets up networking.
+func runWithPasta(bwrapPath string, bwrapArgs []string) error {
+	if _, err := exec.LookPath("pasta"); err != nil {
+		return fmt.Errorf("pasta is required for --network bridge: %w", err)
+	}
+
+	// Create pipes for bwrap coordination.
+	infoRead, infoWrite, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("failed to create info pipe: %w", err)
+	}
+	defer infoRead.Close()
+
+	blockRead, blockWrite, err := os.Pipe()
+	if err != nil {
+		infoWrite.Close()
+		return fmt.Errorf("failed to create block pipe: %w", err)
+	}
+	defer blockWrite.Close()
+
+	// ExtraFiles starts at fd 3: infoWrite=fd 3, blockRead=fd 4.
+	bwrapArgs = append([]string{"--info-fd", "3", "--userns-block-fd", "4"}, bwrapArgs...)
+
+	cmd := exec.Command(bwrapPath, bwrapArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{infoWrite, blockRead}
+
+	if err := cmd.Start(); err != nil {
+		infoWrite.Close()
+		blockRead.Close()
+		return fmt.Errorf("failed to start bwrap: %w", err)
+	}
+
+	// Close our copies of the pipe ends that bwrap now owns.
+	infoWrite.Close()
+	blockRead.Close()
+
+	// Read child PID from info-fd.
+	var info bwrapInfoJSON
+	if err := json.NewDecoder(infoRead).Decode(&info); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("failed to read bwrap info: %w", err)
+	}
+	infoRead.Close()
+
+	// Launch pasta to attach networking to the sandbox's network namespace.
+	pastaCmd := exec.Command("pasta", "--config-net", "-t", "none", "-u", "none",
+		"--ns-ifname", "eth0", fmt.Sprintf("%d", info.ChildPID))
+	pastaCmd.Stdout = os.Stdout
+	pastaCmd.Stderr = os.Stderr
+	if err := pastaCmd.Run(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("failed to run pasta: %w", err)
+	}
+
+	// Unblock the sandbox by writing to userns-block-fd.
+	_, _ = blockWrite.Write([]byte{0})
+	blockWrite.Close()
+
+	// Forward signals to the child.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range sigCh {
+			_ = cmd.Process.Signal(sig)
+		}
+	}()
+
+	err = cmd.Wait()
+	signal.Stop(sigCh)
+
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return &ExitError{Code: exitErr.ExitCode()}
+		}
+		return fmt.Errorf("bwrap failed: %w", err)
+	}
+	return nil
+}
+
+func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) error {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+	if err != nil {
+		return err
+	}
+
+	resolvedProgram, err := resolveProgram(program)
+	if err != nil {
+		return err
+	}
+	programDir := filepath.Dir(resolvedProgram)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Bind-mount the program's directory if not already covered.
+	if mountCurrentDir && programDir != cwd {
+		args = append(args, "--ro-bind", programDir, programDir)
+	}
+	if !strings.HasPrefix(programDir, "/usr") &&
+		!strings.HasPrefix(programDir, "/bin") &&
+		!strings.HasPrefix(programDir, "/sbin") &&
+		!(mountCurrentDir && cwd == programDir) {
+		args = append(args, "--ro-bind", programDir, programDir)
+	}
+
+	args = append(args, "--unshare-net", "--unshare-uts")
+
+	// DNS: mount /run/systemd/resolve if present.
+	info, statErr := os.Stat(systemdResolve)
+	if statErr == nil && info.IsDir() {
+		args = append(args, "--ro-bind", systemdResolve, systemdResolve)
+	}
+
+	if apparmor != "" {
+		args = append(args, "aa-exec", "-p", apparmor, "--")
+	}
+	args = append(args, resolvedProgram)
+	args = append(args, arguments...)
+
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	return runWithPasta(bwrapPath, args)
+}
+
+func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string) error {
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	args := []string{
+		"--dev-bind", "/", "/",
+		"--unshare-user", "--unshare-net",
+	}
+	if apparmor != "" {
+		args = append(args, "aa-exec", "-p", apparmor, "--")
+	}
+	args = append(args, program)
+	args = append(args, arguments...)
+
+	return runWithPasta(bwrapPath, args)
 }
 
 func wrappedNetworkSandboxOnly(program string, arguments []string, apparmor string) error {

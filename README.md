@@ -14,7 +14,9 @@ This is a Linux program, might also work in WSL in Windows (currently not tested
 
 Requires bubblewrap to be installed and the `bwrap` command to be in `PATH`.
 
-The `--allow-host` and `--allow-all-hosts` features additionally require `socat` to be installed and in `PATH`.
+The `--network bridge` mode requires [pasta](https://passt.top/) (from the passt project) to be installed and in `PATH`.
+
+The `--network filtered` mode (used with `--allow-host` and `--allow-all-hosts`) requires `socat` to be installed and in `PATH`.
 
 ## Install
 
@@ -32,9 +34,9 @@ wrapped [flags] -- program [arguments...]
 
 | Flag | Description |
 |------|-------------|
-| `--network` | Enable full network access |
-| `--allow-host <host>` | Allow network access to a specific host (repeatable, supports `*.example.com` wildcards) |
-| `--allow-all-hosts` | Allow network access to all hosts (use `--deny-host` to exclude specific hosts) |
+| `--network <mode>` | Network mode: `none` (default), `host`, `bridge`, or `filtered` |
+| `--allow-host <host>` | Allow network access to a specific host (repeatable, supports `*.example.com` wildcards, implies `--network filtered`) |
+| `--allow-all-hosts` | Allow network access to all hosts (implies `--network filtered`, use `--deny-host` to exclude specific hosts) |
 | `--deny-host <host>` | Deny network access to a specific host when using `--allow-all-hosts` (repeatable, supports `*.example.com` wildcards) |
 | `--current-dir` | Mount the current directory read-only |
 | `--current-dir-writable` | Mount the current directory writable |
@@ -42,9 +44,18 @@ wrapped [flags] -- program [arguments...]
 | `--mount-writable <path>` | Mount additional directory writable (repeatable) |
 | `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable) |
 | `-w`, `--workdir <path>` | Working directory inside the sandbox |
-| `--network-log <file>` | Log all network connections to a file (requires `--allow-host` or `--allow-all-hosts`) |
+| `--network-log <file>` | Log all network connections to a file (requires `--network filtered`) |
 | `--apparmor <profile>` | Run program with an AppArmor profile |
 | `--no-filesystem-sandbox` | Only sandbox the network, leave filesystem untouched |
+
+#### Network modes
+
+| Mode | Description |
+|------|-------------|
+| `none` | No network access (default). The network namespace is fully isolated. |
+| `host` | Full network access with no isolation. |
+| `bridge` | Transparent network access via [pasta](https://passt.top/). The sandbox has its own network namespace but can reach the Internet. |
+| `filtered` | Network access filtered by domain via HTTP/SOCKS5 proxies. Use with `--allow-host` or `--allow-all-hosts`. Requires `socat`. |
 
 ### Examples
 
@@ -53,9 +64,14 @@ Run a program with no network and no access to the filesystem (beyond read-only 
 wrapped program arg1 arg2
 ```
 
-Run with full network access:
+Run with full network access (no isolation):
 ```bash
-wrapped --network curl https://example.com
+wrapped --network host curl https://example.com
+```
+
+Run with transparent network access via pasta (sandboxed but with full connectivity):
+```bash
+wrapped --network bridge curl https://example.com
 ```
 
 Allow network access only to specific hosts:
@@ -78,7 +94,12 @@ Run with network isolation only (no filesystem sandbox):
 wrapped --no-filesystem-sandbox curl https://example.com
 ```
 
-Network isolation only with filtered network access:
+Network-only sandbox with pasta networking:
+```bash
+wrapped --no-filesystem-sandbox --network bridge curl https://example.com
+```
+
+Network-only sandbox with filtered network access:
 ```bash
 wrapped --no-filesystem-sandbox --allow-host example.com curl https://example.com
 ```
