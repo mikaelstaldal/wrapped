@@ -4,7 +4,8 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## Project Overview
 
-**wrapped** is a CLI tool that runs programs in a sandbox using [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`). It requires `bwrap` to be installed and in `PATH`. Linux only. The `--allow-host` feature additionally requires `socat`.
+**wrapped** is a CLI tool that runs programs in a sandbox using [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`). It requires `bwrap` to be installed and in `PATH`. Linux only. 
+The `--allow-host` feature additionally requires `socat`.
 
 The project is implemented in **Go**:
 -  — library in `wrapped.go` and `proxy.go`, CLI in `cmd/wrapped/main.go`
@@ -36,3 +37,7 @@ Key design: the tool constructs a `bwrap` command line with namespace isolation 
 1. **No network** (default): `--unshare-net` isolates the network namespace completely.
 2. **Full network** (`--network`): no network isolation, DNS resolution via `/run/systemd/resolve` if available.
 3. **Filtered network** (`--allow-host`): network namespace is isolated, but HTTP/SOCKS5 proxy servers on the host filter traffic by domain. Unix domain sockets + socat bridge the proxies into the sandbox. Proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, etc.) are set automatically. Mutually exclusive with `--network`.
+
+### Documentation
+
+Keep the documentation in `README.md` up-to-date with command line options etc.

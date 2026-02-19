@@ -31,14 +31,18 @@ var envPassthrough = []string{
 
 func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	allowAllHosts bool, deniedHosts []string) error {
+	allowAllHosts bool, deniedHosts []string, networkLogFile string) error {
 	if len(allowedHosts) > 0 {
 		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			extraEnv, workdir, apparmor, allowListFilter(allowedHosts))
+			extraEnv, workdir, apparmor, allowListFilter(allowedHosts), networkLogFile)
 	}
 	if allowAllHosts {
 		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			extraEnv, workdir, apparmor, denyListFilter(deniedHosts))
+			extraEnv, workdir, apparmor, denyListFilter(deniedHosts), networkLogFile)
+	}
+
+	if networkLogFile != "" {
+		return fmt.Errorf("--network-log requires --allow-host or --allow-all-hosts")
 	}
 
 	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable,
@@ -58,20 +62,31 @@ func Wrapped(program string, arguments []string, network, mountCurrentDir, mount
 }
 
 func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filter hostFilter) error {
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filter hostFilter, networkLogFile string) error {
 	// Check socat is available.
 	if _, err := exec.LookPath("socat"); err != nil {
 		return fmt.Errorf("socat is required for filtered network access: %w", err)
 	}
 
+	// Set up network logger if requested.
+	var netLog *networkLogger
+	if networkLogFile != "" {
+		f, err := os.OpenFile(networkLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open network log file: %w", err)
+		}
+		defer f.Close()
+		netLog = newNetworkLogger(f)
+	}
+
 	// Start proxy servers.
-	httpPort, httpClose, err := startHTTPProxy(filter)
+	httpPort, httpClose, err := startHTTPProxy(filter, netLog)
 	if err != nil {
 		return fmt.Errorf("failed to start HTTP proxy: %w", err)
 	}
 	defer httpClose()
 
-	socksPort, socksClose, err := startSOCKS5Proxy(filter)
+	socksPort, socksClose, err := startSOCKS5Proxy(filter, netLog)
 	if err != nil {
 		return fmt.Errorf("failed to start SOCKS5 proxy: %w", err)
 	}

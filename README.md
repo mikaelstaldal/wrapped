@@ -42,6 +42,7 @@ wrapped [flags] -- program [arguments...]
 | `--mount-writable <path>` | Mount additional directory writable (repeatable) |
 | `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable) |
 | `-w`, `--workdir <path>` | Working directory inside the sandbox |
+| `--network-log <file>` | Log all network connections to a file (requires `--allow-host` or `--allow-all-hosts`) |
 | `--apparmor <profile>` | Run program with an AppArmor profile |
 
 ### Examples

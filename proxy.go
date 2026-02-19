@@ -4,12 +4,39 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/things-go/go-socks5"
 )
+
+// networkLogger writes one line per connection to a log file.
+type networkLogger struct {
+	mu     sync.Mutex
+	logger *log.Logger
+}
+
+func newNetworkLogger(w io.Writer) *networkLogger {
+	return &networkLogger{
+		logger: log.New(w, "", log.LstdFlags),
+	}
+}
+
+func (l *networkLogger) log(proto, host string, allowed bool) {
+	if l == nil {
+		return
+	}
+	status := "ALLOWED"
+	if !allowed {
+		status = "DENIED"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logger.Printf("%s %s %s", proto, host, status)
+}
 
 // hostFilter is a function that reports whether a given host (with optional port) is allowed.
 type hostFilter func(host string) bool
@@ -54,7 +81,7 @@ func denyListFilter(deniedHosts []string) hostFilter {
 
 // startHTTPProxy starts an HTTP/HTTPS proxy that filters connections using the given hostFilter.
 // It returns the listener port, a close function, and any error.
-func startHTTPProxy(filter hostFilter) (int, func(), error) {
+func startHTTPProxy(filter hostFilter, netLog *networkLogger) (int, func(), error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, nil, fmt.Errorf("http proxy listen: %w", err)
@@ -64,9 +91,9 @@ func startHTTPProxy(filter hostFilter) (int, func(), error) {
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodConnect {
-				handleConnect(w, r, filter)
+				handleConnect(w, r, filter, netLog)
 			} else {
-				handleHTTP(w, r, filter)
+				handleHTTP(w, r, filter, netLog)
 			}
 		}),
 	}
@@ -79,8 +106,10 @@ func startHTTPProxy(filter hostFilter) (int, func(), error) {
 	return port, closer, nil
 }
 
-func handleConnect(w http.ResponseWriter, r *http.Request, filter hostFilter) {
-	if !filter(r.Host) {
+func handleConnect(w http.ResponseWriter, r *http.Request, filter hostFilter, netLog *networkLogger) {
+	allowed := filter(r.Host)
+	netLog.log("CONNECT", r.Host, allowed)
+	if !allowed {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -120,8 +149,10 @@ func handleConnect(w http.ResponseWriter, r *http.Request, filter hostFilter) {
 	}()
 }
 
-func handleHTTP(w http.ResponseWriter, r *http.Request, filter hostFilter) {
-	if !filter(r.URL.Host) {
+func handleHTTP(w http.ResponseWriter, r *http.Request, filter hostFilter, netLog *networkLogger) {
+	allowed := filter(r.URL.Host)
+	netLog.log("HTTP", r.URL.Host, allowed)
+	if !allowed {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -146,6 +177,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, filter hostFilter) {
 // filterRuleSet implements socks5.RuleSet using a hostFilter.
 type filterRuleSet struct {
 	filter hostFilter
+	netLog *networkLogger
 }
 
 func (r *filterRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
@@ -153,12 +185,17 @@ func (r *filterRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	if host == "" {
 		host = req.DestAddr.IP.String()
 	}
-	return ctx, r.filter(host)
+	if req.DestAddr.Port != 0 {
+		host = fmt.Sprintf("%s:%d", host, req.DestAddr.Port)
+	}
+	allowed := r.filter(host)
+	r.netLog.log("SOCKS5", host, allowed)
+	return ctx, allowed
 }
 
 // startSOCKS5Proxy starts a SOCKS5 proxy that filters connections using the given hostFilter.
 // Returns the listener port, a close function, and any error.
-func startSOCKS5Proxy(filter hostFilter) (int, func(), error) {
+func startSOCKS5Proxy(filter hostFilter, netLog *networkLogger) (int, func(), error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, nil, fmt.Errorf("socks5 proxy listen: %w", err)
@@ -166,7 +203,7 @@ func startSOCKS5Proxy(filter hostFilter) (int, func(), error) {
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	server := socks5.NewServer(
-		socks5.WithRule(&filterRuleSet{filter: filter}),
+		socks5.WithRule(&filterRuleSet{filter: filter, netLog: netLog}),
 	)
 
 	go server.Serve(listener)
