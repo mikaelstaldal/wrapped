@@ -31,14 +31,46 @@ var envPassthrough = []string{
 
 func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	allowAllHosts bool, deniedHosts []string, networkLogFile string) error {
+	allowAllHosts bool, deniedHosts []string, networkLogFile string, networkSandboxOnly bool) error {
+	if networkSandboxOnly {
+		// Validate incompatible flags.
+		if mountCurrentDir || mountCurrentDirWritable {
+			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --current-dir or --current-dir-writable")
+		}
+		if len(mountReadonly) > 0 {
+			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --mount")
+		}
+		if len(mountWritable) > 0 {
+			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --mount-writable")
+		}
+		if workdir != "" {
+			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --workdir")
+		}
+		if len(extraEnv) > 0 {
+			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --env")
+		}
+
+		if len(allowedHosts) > 0 {
+			return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
+		}
+		if allowAllHosts {
+			return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
+		}
+
+		if networkLogFile != "" {
+			return fmt.Errorf("--network-log requires --allow-host or --allow-all-hosts")
+		}
+
+		return wrappedNetworkSandboxOnly(program, arguments, apparmor)
+	}
+
 	if len(allowedHosts) > 0 {
-		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			extraEnv, workdir, apparmor, allowListFilter(allowedHosts), networkLogFile)
+		buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+		return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildArgs)
 	}
 	if allowAllHosts {
-		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			extraEnv, workdir, apparmor, denyListFilter(deniedHosts), networkLogFile)
+		buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+		return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildArgs)
 	}
 
 	if networkLogFile != "" {
@@ -46,7 +78,7 @@ func Wrapped(program string, arguments []string, network, mountCurrentDir, mount
 	}
 
 	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable,
-		mountReadonly, mountWritable, extraEnv, workdir, apparmor, nil)
+		mountReadonly, mountWritable, extraEnv, workdir, apparmor)
 	if err != nil {
 		return err
 	}
@@ -61,8 +93,59 @@ func Wrapped(program string, arguments []string, network, mountCurrentDir, mount
 	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
 }
 
-func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filter hostFilter, networkLogFile string) error {
+// filteredBwrapArgsBuilder builds the bwrap command for filtered network mode.
+// It receives the Unix socket paths and returns the bwrap path and args.
+// The args must NOT include the program/arguments — those are appended by wrappedFiltered.
+type filteredBwrapArgsBuilder func(httpSock, socksSock string) (bwrapPath string, args []string, err error)
+
+// newFullSandboxBwrapArgsBuilder returns a builder that uses the full filesystem sandbox.
+func newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable, extraEnv []string, workdir string) filteredBwrapArgsBuilder {
+	return func(httpSock, socksSock string) (string, []string, error) {
+		filterConfig := &filteredNetConfig{
+			httpSock:  httpSock,
+			socksSock: socksSock,
+		}
+		bwrapArgs, err := buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable,
+			mountReadonly, mountWritable, extraEnv, workdir, filterConfig)
+		if err != nil {
+			return "", nil, err
+		}
+
+		bwrapPath, err := exec.LookPath("bwrap")
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to find bwrap: %w", err)
+		}
+
+		return bwrapPath, bwrapArgs, nil
+	}
+}
+
+// buildNetworkOnlyBwrapArgs builds bwrap args for network-only sandboxing (no filesystem sandbox).
+func buildNetworkOnlyBwrapArgs(httpSock, socksSock string) (string, []string, error) {
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	args := []string{
+		"--dev-bind", "/", "/",
+		"--unshare-user", "--unshare-net",
+		"--setenv", "HTTP_PROXY", "http://localhost:3128",
+		"--setenv", "HTTPS_PROXY", "http://localhost:3128",
+		"--setenv", "http_proxy", "http://localhost:3128",
+		"--setenv", "https_proxy", "http://localhost:3128",
+		"--setenv", "ALL_PROXY", "socks5h://localhost:1080",
+		"--setenv", "all_proxy", "socks5h://localhost:1080",
+		"--setenv", "NO_PROXY", "localhost,127.0.0.1,::1",
+		"--setenv", "no_proxy", "localhost,127.0.0.1,::1",
+	}
+
+	return bwrapPath, args, nil
+}
+
+func wrappedFiltered(program string, arguments []string, apparmor string, filter hostFilter,
+	networkLogFile string, buildArgs filteredBwrapArgsBuilder) error {
 	// Check socat is available.
 	if _, err := exec.LookPath("socat"); err != nil {
 		return fmt.Errorf("socat is required for filtered network access: %w", err)
@@ -115,21 +198,25 @@ func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountC
 	}
 	defer socksBridge.Process.Kill()
 
-	// Build bwrap args with filtered network config.
-	filterConfig := &filteredNetConfig{
-		httpSock:  httpSock,
-		socksSock: socksSock,
-	}
-	bwrapArgs, err := buildBwrapArgs(program, arguments, false, mountCurrentDir, mountCurrentDirWritable,
-		mountReadonly, mountWritable, extraEnv, workdir, apparmor, filterConfig)
+	// Build bwrap args.
+	bwrapPath, bwrapArgs, err := buildArgs(httpSock, socksSock)
 	if err != nil {
 		return err
 	}
 
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
+	// Build the shell command that runs inside the sandbox.
+	shellCmd := fmt.Sprintf(
+		"socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
+			"socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
+			"exec ",
+		httpSock, socksSock)
+	if apparmor != "" {
+		shellCmd += fmt.Sprintf("aa-exec -p %s -- ", apparmor)
 	}
+	shellCmd += `"$0" "$@"`
+
+	bwrapArgs = append(bwrapArgs, "sh", "-c", shellCmd, program)
+	bwrapArgs = append(bwrapArgs, arguments...)
 
 	// Run bwrap as a child process.
 	cmd := exec.Command(bwrapPath, bwrapArgs...)
@@ -198,8 +285,108 @@ func isParentOrEqual(parent, child string) bool {
 	return strings.HasPrefix(child, prefix)
 }
 
+func wrappedNetworkSandboxOnly(program string, arguments []string, apparmor string) error {
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	argv := []string{"bwrap", "--dev-bind", "/", "/", "--unshare-user", "--unshare-net"}
+	if apparmor != "" {
+		argv = append(argv, "aa-exec", "-p", apparmor, "--")
+	}
+	argv = append(argv, program)
+	argv = append(argv, arguments...)
+	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
+}
+
+// buildFilteredBwrapArgs builds bwrap args for the full filesystem sandbox with filtered network.
+// It returns args up to (but not including) the program command — the caller appends the shell command.
+func buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable, extraEnv []string, workdir string, filterCfg *filteredNetConfig) ([]string, error) {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+	if err != nil {
+		return nil, err
+	}
+
+	args = append(args, "--unshare-net", "--unshare-uts")
+
+	// Bind-mount Unix sockets into the sandbox.
+	args = append(args, "--bind", filterCfg.httpSock, filterCfg.httpSock)
+	args = append(args, "--bind", filterCfg.socksSock, filterCfg.socksSock)
+
+	// Set proxy environment variables.
+	args = append(args,
+		"--setenv", "HTTP_PROXY", "http://localhost:3128",
+		"--setenv", "HTTPS_PROXY", "http://localhost:3128",
+		"--setenv", "http_proxy", "http://localhost:3128",
+		"--setenv", "https_proxy", "http://localhost:3128",
+		"--setenv", "ALL_PROXY", "socks5h://localhost:1080",
+		"--setenv", "all_proxy", "socks5h://localhost:1080",
+		"--setenv", "NO_PROXY", "localhost,127.0.0.1,::1",
+		"--setenv", "no_proxy", "localhost,127.0.0.1,::1",
+	)
+
+	// DNS: mount /run/systemd/resolve if present.
+	info, err := os.Stat(systemdResolve)
+	if err == nil && info.IsDir() {
+		args = append(args, "--ro-bind", systemdResolve, systemdResolve)
+	}
+
+	return args, nil
+}
+
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filterCfg *filteredNetConfig) ([]string, error) {
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) ([]string, error) {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+	if err != nil {
+		return nil, err
+	}
+
+	resolvedProgram, err := resolveProgram(program)
+	if err != nil {
+		return nil, err
+	}
+	programDir := filepath.Dir(resolvedProgram)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Bind-mount the program's directory if not already covered.
+	if mountCurrentDir && programDir != cwd {
+		args = append(args, "--ro-bind", programDir, programDir)
+	}
+	if !strings.HasPrefix(programDir, "/usr") &&
+		!strings.HasPrefix(programDir, "/bin") &&
+		!strings.HasPrefix(programDir, "/sbin") &&
+		!(mountCurrentDir && cwd == programDir) {
+		args = append(args, "--ro-bind", programDir, programDir)
+	}
+
+	if network {
+		info, err := os.Stat(systemdResolve)
+		if err == nil && info.IsDir() {
+			args = append(args, "--ro-bind", systemdResolve, systemdResolve)
+		}
+	} else {
+		args = append(args, "--unshare-net", "--unshare-uts")
+	}
+
+	if apparmor != "" {
+		args = append(args, "aa-exec", "-p", apparmor, "--")
+	}
+	args = append(args, resolvedProgram)
+	args = append(args, arguments...)
+
+	return args, nil
+}
+
+// buildBaseBwrapArgs builds the common bwrap args shared by all full-sandbox modes:
+// filesystem mounts, current directory, mount points, environment, and core namespace isolation.
+func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable, extraEnv []string, workdir string) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -214,12 +401,6 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 		"--proc", "/proc",
 		"--dev", "/dev",
 	)
-
-	resolvedProgram, err := resolveProgram(program)
-	if err != nil {
-		return nil, err
-	}
-	programDir := filepath.Dir(resolvedProgram)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -247,19 +428,8 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 		} else {
 			args = append(args, "--chdir", cwd)
 		}
-
-		if programDir != cwd {
-			args = append(args, "--ro-bind", programDir, programDir)
-		}
 	} else if workdir != "" {
 		args = append(args, "--chdir", workdir)
-	}
-
-	if !strings.HasPrefix(programDir, "/usr") &&
-		!strings.HasPrefix(programDir, "/bin") &&
-		!strings.HasPrefix(programDir, "/sbin") &&
-		!(mountCurrentDir && cwd == programDir) {
-		args = append(args, "--ro-bind", programDir, programDir)
 	}
 
 	for _, path := range mountReadonly {
@@ -303,63 +473,6 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 		"--unshare-pid",
 		"--unshare-cgroup-try",
 	)
-
-	if filterCfg != nil {
-		// Filtered network: isolated network namespace with proxy access via Unix sockets.
-		args = append(args, "--unshare-net", "--unshare-uts")
-
-		// Bind-mount Unix sockets into the sandbox.
-		args = append(args, "--bind", filterCfg.httpSock, filterCfg.httpSock)
-		args = append(args, "--bind", filterCfg.socksSock, filterCfg.socksSock)
-
-		// Set proxy environment variables.
-		args = append(args,
-			"--setenv", "HTTP_PROXY", "http://localhost:3128",
-			"--setenv", "HTTPS_PROXY", "http://localhost:3128",
-			"--setenv", "http_proxy", "http://localhost:3128",
-			"--setenv", "https_proxy", "http://localhost:3128",
-			"--setenv", "ALL_PROXY", "socks5h://localhost:1080",
-			"--setenv", "all_proxy", "socks5h://localhost:1080",
-			"--setenv", "NO_PROXY", "localhost,127.0.0.1,::1",
-			"--setenv", "no_proxy", "localhost,127.0.0.1,::1",
-		)
-
-		// DNS: mount /run/systemd/resolve if present.
-		info, err := os.Stat(systemdResolve)
-		if err == nil && info.IsDir() {
-			args = append(args, "--ro-bind", systemdResolve, systemdResolve)
-		}
-
-		// Wrap the program invocation with socat bridges inside the sandbox.
-		shellCmd := fmt.Sprintf(
-			"socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
-				"socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
-				"exec ",
-			filterCfg.httpSock, filterCfg.socksSock)
-
-		if apparmor != "" {
-			shellCmd += fmt.Sprintf("aa-exec -p %s -- ", apparmor)
-		}
-		shellCmd += `"$0" "$@"`
-
-		args = append(args, "sh", "-c", shellCmd, resolvedProgram)
-		args = append(args, arguments...)
-	} else {
-		if network {
-			info, err := os.Stat(systemdResolve)
-			if err == nil && info.IsDir() {
-				args = append(args, "--ro-bind", systemdResolve, systemdResolve)
-			}
-		} else {
-			args = append(args, "--unshare-net", "--unshare-uts")
-		}
-
-		if apparmor != "" {
-			args = append(args, "aa-exec", "-p", apparmor, "--")
-		}
-		args = append(args, resolvedProgram)
-		args = append(args, arguments...)
-	}
 
 	return args, nil
 }

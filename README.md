@@ -44,6 +44,7 @@ wrapped [flags] -- program [arguments...]
 | `-w`, `--workdir <path>` | Working directory inside the sandbox |
 | `--network-log <file>` | Log all network connections to a file (requires `--allow-host` or `--allow-all-hosts`) |
 | `--apparmor <profile>` | Run program with an AppArmor profile |
+| `--no-filesystem-sandbox` | Only sandbox the network, leave filesystem untouched |
 
 ### Examples
 
@@ -70,6 +71,16 @@ wrapped --allow-all-hosts --deny-host '*.evil.com' curl https://example.com
 Mount the current directory writable and pass environment variables:
 ```bash
 wrapped --current-dir-writable -e HOME -e MY_VAR=value program
+```
+
+Run with network isolation only (no filesystem sandbox):
+```bash
+wrapped --no-filesystem-sandbox curl https://example.com
+```
+
+Network isolation only with filtered network access:
+```bash
+wrapped --no-filesystem-sandbox --allow-host example.com curl https://example.com
 ```
 
 ## License

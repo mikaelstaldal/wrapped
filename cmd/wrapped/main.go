@@ -23,6 +23,7 @@ func main() {
 		allowAllHosts      bool
 		deniedHosts        []string
 		networkLogFile     string
+		networkSandboxOnly bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -47,6 +48,7 @@ func main() {
 				allowAllHosts,
 				deniedHosts,
 				networkLogFile,
+				networkSandboxOnly,
 			)
 		},
 	}
@@ -64,9 +66,11 @@ func main() {
 	f.BoolVar(&allowAllHosts, "allow-all-hosts", false, "Allow network access to all hosts (use --deny-host to exclude specific hosts)")
 	f.StringArrayVar(&deniedHosts, "deny-host", nil, "Deny network access to specific host when using --allow-all-hosts (can be repeated, supports *.example.com wildcards)")
 	f.StringVar(&networkLogFile, "network-log", "", "Log all network connections to file (requires --allow-host or --allow-all-hosts)")
+	f.BoolVar(&networkSandboxOnly, "no-filesystem-sandbox", false, "Only sandbox the network, leave filesystem untouched")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 	rootCmd.MarkFlagsMutuallyExclusive("network", "allow-host", "allow-all-hosts")
+	rootCmd.MarkFlagsMutuallyExclusive("network", "no-filesystem-sandbox")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
