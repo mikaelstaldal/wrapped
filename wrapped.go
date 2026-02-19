@@ -2,10 +2,10 @@
 package wrapped
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -334,75 +334,60 @@ func isParentOrEqual(parent, child string) bool {
 	return strings.HasPrefix(child, prefix)
 }
 
-// bwrapInfoJSON is the JSON structure written by bwrap to --info-fd.
-type bwrapInfoJSON struct {
-	ChildPID int `json:"child-pid"`
+// hasIPv6Route reports whether the host has a non-loopback interface with a global unicast IPv6 address.
+func hasIPv6Route() bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if ok && ipNet.IP.To4() == nil && ipNet.IP.IsGlobalUnicast() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-// runWithPasta runs bwrap as a child process with pasta providing network access.
-// It uses --info-fd to learn the child PID and --userns-block-fd to pause the child
-// while pasta sets up networking.
-func runWithPasta(bwrapPath string, bwrapArgs []string) error {
-	if _, err := exec.LookPath("pasta"); err != nil {
+// runPastaCommand runs pasta in command mode, where pasta creates the user+network
+// namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
+// coordination protocol that causes ECHILD errors with --unshare-pid.
+func runPastaCommand(name string, args []string) error {
+	pastaPath, err := exec.LookPath("pasta")
+	if err != nil {
 		return fmt.Errorf("pasta is required for --network bridge: %w", err)
 	}
 
-	// Create pipes for bwrap coordination.
-	infoRead, infoWrite, err := os.Pipe()
-	if err != nil {
-		return fmt.Errorf("failed to create info pipe: %w", err)
+	pastaArgs := []string{
+		"--config-net",
+		"-t", "none", "-u", "none", // Disable host-to-namespace port forwarding.
+		"-T", "none", "-U", "none", // Disable namespace-to-host splice forwarding.
+		"--ns-ifname", "eth0",
 	}
-	defer infoRead.Close()
-
-	blockRead, blockWrite, err := os.Pipe()
-	if err != nil {
-		infoWrite.Close()
-		return fmt.Errorf("failed to create block pipe: %w", err)
+	if !hasIPv6Route() {
+		pastaArgs = append(pastaArgs, "-4")
 	}
-	defer blockWrite.Close()
+	pastaArgs = append(pastaArgs, "--")
+	pastaArgs = append(pastaArgs, name)
+	pastaArgs = append(pastaArgs, args...)
 
-	// ExtraFiles starts at fd 3: infoWrite=fd 3, blockRead=fd 4.
-	bwrapArgs = append([]string{"--info-fd", "3", "--userns-block-fd", "4"}, bwrapArgs...)
-
-	cmd := exec.Command(bwrapPath, bwrapArgs...)
+	cmd := exec.Command(pastaPath, pastaArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.ExtraFiles = []*os.File{infoWrite, blockRead}
 
 	if err := cmd.Start(); err != nil {
-		infoWrite.Close()
-		blockRead.Close()
-		return fmt.Errorf("failed to start bwrap: %w", err)
+		return fmt.Errorf("failed to start pasta: %w", err)
 	}
-
-	// Close our copies of the pipe ends that bwrap now owns.
-	infoWrite.Close()
-	blockRead.Close()
-
-	// Read child PID from info-fd.
-	var info bwrapInfoJSON
-	if err := json.NewDecoder(infoRead).Decode(&info); err != nil {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-		return fmt.Errorf("failed to read bwrap info: %w", err)
-	}
-	infoRead.Close()
-
-	// Launch pasta to attach networking to the sandbox's network namespace.
-	pastaCmd := exec.Command("pasta", "--config-net", "-t", "none", "-u", "none",
-		"--ns-ifname", "eth0", fmt.Sprintf("%d", info.ChildPID))
-	pastaCmd.Stdout = os.Stdout
-	pastaCmd.Stderr = os.Stderr
-	if err := pastaCmd.Run(); err != nil {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-		return fmt.Errorf("failed to run pasta: %w", err)
-	}
-
-	// Unblock the sandbox by writing to userns-block-fd.
-	_, _ = blockWrite.Write([]byte{0})
-	blockWrite.Close()
 
 	// Forward signals to the child.
 	sigCh := make(chan os.Signal, 1)
@@ -421,7 +406,7 @@ func runWithPasta(bwrapPath string, bwrapArgs []string) error {
 		if errors.As(err, &exitErr) {
 			return &ExitError{Code: exitErr.ExitCode()}
 		}
-		return fmt.Errorf("bwrap failed: %w", err)
+		return fmt.Errorf("pasta failed: %w", err)
 	}
 	return nil
 }
@@ -432,6 +417,10 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 	if err != nil {
 		return err
 	}
+
+	// Explicitly set UID/GID so that bwrap maps the current user correctly inside
+	// the nested user namespace (pasta's user namespace has its own UID mapping).
+	args = append(args, "--uid", fmt.Sprintf("%d", os.Getuid()), "--gid", fmt.Sprintf("%d", os.Getgid()))
 
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
@@ -455,12 +444,17 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		args = append(args, "--ro-bind", programDir, programDir)
 	}
 
-	args = append(args, "--unshare-net", "--unshare-uts")
+	// No --unshare-net: pasta creates the network namespace in command mode.
+	args = append(args, "--unshare-uts")
 
-	// DNS: mount /run/systemd/resolve if present.
-	info, statErr := os.Stat(systemdResolve)
-	if statErr == nil && info.IsDir() {
-		args = append(args, "--ro-bind", systemdResolve, systemdResolve)
+	// DNS: mount /run/systemd/resolve so the /etc/resolv.conf symlink target exists,
+	// then overlay stub-resolv.conf with the non-stub version containing real upstream
+	// DNS servers (the stub resolver at 127.0.0.53 is not reachable from pasta's namespace).
+	nonStubResolv := systemdResolve + "/resolv.conf"
+	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+		args = append(args,
+			"--ro-bind", systemdResolve, systemdResolve,
+			"--ro-bind", nonStubResolv, systemdResolve+"/stub-resolv.conf")
 	}
 
 	if apparmor != "" {
@@ -474,7 +468,7 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to find bwrap: %w", err)
 	}
 
-	return runWithPasta(bwrapPath, args)
+	return runPastaCommand(bwrapPath, args)
 }
 
 func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string) error {
@@ -485,15 +479,24 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 
 	args := []string{
 		"--dev-bind", "/", "/",
-		"--unshare-user", "--unshare-net",
+		"--unshare-user",
+		"--uid", fmt.Sprintf("%d", os.Getuid()),
+		"--gid", fmt.Sprintf("%d", os.Getgid()),
 	}
+
+	// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
+	nonStubResolv := systemdResolve + "/resolv.conf"
+	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+		args = append(args, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
+	}
+
 	if apparmor != "" {
 		args = append(args, "aa-exec", "-p", apparmor, "--")
 	}
 	args = append(args, program)
 	args = append(args, arguments...)
 
-	return runWithPasta(bwrapPath, args)
+	return runPastaCommand(bwrapPath, args)
 }
 
 func wrappedNetworkSandboxOnly(program string, arguments []string, apparmor string) error {
