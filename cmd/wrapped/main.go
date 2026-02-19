@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"os"
 	"wrapped"
@@ -30,8 +31,9 @@ func main() {
 		Use:   "wrapped [flags] program [arguments...]",
 		Short: "Run a program in a sandbox using bubblewrap",
 		Args:  cobra.MinimumNArgs(1),
-		// Avoid printing usage on every RunE error.
-		SilenceUsage: true,
+		// Avoid printing usage/errors on every RunE error — we handle them in main().
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return wrapped.Wrapped(
 				args[0],
@@ -73,7 +75,11 @@ func main() {
 	rootCmd.MarkFlagsMutuallyExclusive("network", "no-filesystem-sandbox")
 
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		var exitErr *wrapped.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.Code)
+		}
+		log.Fatal(err)
 	}
 }
 

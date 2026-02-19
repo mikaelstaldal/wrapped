@@ -12,6 +12,15 @@ import (
 	"syscall"
 )
 
+// ExitError indicates that the sandboxed program exited with a non-zero status.
+type ExitError struct {
+	Code int
+}
+
+func (e *ExitError) Error() string {
+	return fmt.Sprintf("exit code %d", e.Code)
+}
+
 const systemdResolve = "/run/systemd/resolve"
 
 // Environment variables to pass through to the sandbox.
@@ -182,21 +191,24 @@ func wrappedFiltered(program string, arguments []string, apparmor string, filter
 	defer os.Remove(socksSock)
 
 	// Start host-side socat bridges.
+	// Use Setpgid so forked socat children are in the same process group and can be killed together.
 	httpBridge := exec.Command("socat",
 		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", httpSock),
 		fmt.Sprintf("TCP:127.0.0.1:%d", httpPort))
+	httpBridge.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := httpBridge.Start(); err != nil {
 		return fmt.Errorf("failed to start HTTP socat bridge: %w", err)
 	}
-	defer httpBridge.Process.Kill()
+	defer syscall.Kill(-httpBridge.Process.Pid, syscall.SIGKILL)
 
 	socksBridge := exec.Command("socat",
 		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socksSock),
 		fmt.Sprintf("TCP:127.0.0.1:%d", socksPort))
+	socksBridge.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := socksBridge.Start(); err != nil {
 		return fmt.Errorf("failed to start SOCKS5 socat bridge: %w", err)
 	}
-	defer socksBridge.Process.Kill()
+	defer syscall.Kill(-socksBridge.Process.Pid, syscall.SIGKILL)
 
 	// Build bwrap args.
 	bwrapPath, bwrapArgs, err := buildArgs(httpSock, socksSock)
@@ -205,15 +217,16 @@ func wrappedFiltered(program string, arguments []string, apparmor string, filter
 	}
 
 	// Build the shell command that runs inside the sandbox.
+	// Run socat bridges in background, then the program as a foreground child.
+	// When the program exits, kill the background socats and exit with the program's status.
 	shellCmd := fmt.Sprintf(
 		"socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
-			"socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
-			"exec ",
+			"socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & ",
 		httpSock, socksSock)
 	if apparmor != "" {
 		shellCmd += fmt.Sprintf("aa-exec -p %s -- ", apparmor)
 	}
-	shellCmd += `"$0" "$@"`
+	shellCmd += `"$0" "$@"; S=$?; kill 0; exit $S`
 
 	bwrapArgs = append(bwrapArgs, "sh", "-c", shellCmd, program)
 	bwrapArgs = append(bwrapArgs, arguments...)
@@ -243,7 +256,7 @@ func wrappedFiltered(program string, arguments []string, apparmor string, filter
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.ExitCode())
+			return &ExitError{Code: exitErr.ExitCode()}
 		}
 		return fmt.Errorf("bwrap failed: %w", err)
 	}
