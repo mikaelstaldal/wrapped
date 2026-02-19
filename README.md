@@ -24,6 +24,16 @@ The `--network filtered` mode (used with `--allow-host` and `--allow-all-hosts`)
 go install -tags netgo github.com/mikaelstaldal/wrapped/cmd/wrapped@latest
 ```
 
+## Build
+
+To build with version information baked in:
+
+```bash
+go build -ldflags "-X main.version=1.0.0 -X main.commit=$(git rev-parse --short HEAD)" -o wrapped ./cmd/wrapped
+```
+
+Without `-ldflags`, `wrapped --version` prints `dev`.
+
 ## Usage
 
 ```

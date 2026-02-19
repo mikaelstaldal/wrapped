@@ -11,6 +11,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Set via -ldflags at build time.
+var version, commit string
+
 func main() {
 	var (
 		networkMode        string
@@ -28,7 +31,16 @@ func main() {
 		networkSandboxOnly bool
 	)
 
+	versionStr := "dev"
+	if version != "" {
+		versionStr = version
+		if commit != "" {
+			versionStr += " (" + commit + ")"
+		}
+	}
+
 	rootCmd := &cobra.Command{
+		Version: versionStr,
 		Use:   "wrapped [flags] program [arguments...]",
 		Short: "Run a program in a sandbox using bubblewrap",
 		Args:  cobra.MinimumNArgs(1),
