@@ -20,6 +20,8 @@ func main() {
 		workdir            string
 		apparmor           string
 		allowedHosts       []string
+		allowAllHosts      bool
+		deniedHosts        []string
 	)
 
 	rootCmd := &cobra.Command{
@@ -41,12 +43,14 @@ func main() {
 				workdir,
 				apparmor,
 				allowedHosts,
+				allowAllHosts,
+				deniedHosts,
 			)
 		},
 	}
 
 	f := rootCmd.Flags()
-	f.BoolVar(&network, "network", false, "Enable network access")
+	f.BoolVar(&network, "network", false, "Enable full network access")
 	f.BoolVar(&currentDir, "current-dir", false, "Mount the current directory")
 	f.BoolVar(&currentDirWritable, "current-dir-writable", false, "Mount the current directory writable")
 	f.StringArrayVar(&mounts, "mount", nil, "Mount additional directory read-only")
@@ -55,9 +59,11 @@ func main() {
 	f.StringVarP(&workdir, "workdir", "w", "", "Working directory")
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
 	f.StringArrayVar(&allowedHosts, "allow-host", nil, "Allow network access to specific host (can be repeated, supports *.example.com wildcards)")
+	f.BoolVar(&allowAllHosts, "allow-all-hosts", false, "Allow network access to all hosts (use --deny-host to exclude specific hosts)")
+	f.StringArrayVar(&deniedHosts, "deny-host", nil, "Deny network access to specific host when using --allow-all-hosts (can be repeated, supports *.example.com wildcards)")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
-	rootCmd.MarkFlagsMutuallyExclusive("network", "allow-host")
+	rootCmd.MarkFlagsMutuallyExclusive("network", "allow-host", "allow-all-hosts")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

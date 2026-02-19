@@ -11,16 +11,19 @@ import (
 	"github.com/things-go/go-socks5"
 )
 
-// matchHost reports whether the host (with optional port) matches any of the allowed hosts.
+// hostFilter is a function that reports whether a given host (with optional port) is allowed.
+type hostFilter func(host string) bool
+
+// matchHost reports whether the host matches any of the given patterns.
 // Supports exact match ("example.com") and wildcard subdomain ("*.example.com").
-func matchHost(host string, allowedHosts []string) bool {
+func matchHost(host string, patterns []string) bool {
 	// Strip port if present.
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	host = strings.ToLower(host)
 
-	for _, pattern := range allowedHosts {
+	for _, pattern := range patterns {
 		pattern = strings.ToLower(pattern)
 		if pattern == host {
 			return true
@@ -35,9 +38,23 @@ func matchHost(host string, allowedHosts []string) bool {
 	return false
 }
 
-// startHTTPProxy starts an HTTP/HTTPS proxy that only allows connections to allowedHosts.
+// allowListFilter returns a hostFilter that allows only the given hosts.
+func allowListFilter(allowedHosts []string) hostFilter {
+	return func(host string) bool {
+		return matchHost(host, allowedHosts)
+	}
+}
+
+// denyListFilter returns a hostFilter that allows all hosts except the given ones.
+func denyListFilter(deniedHosts []string) hostFilter {
+	return func(host string) bool {
+		return !matchHost(host, deniedHosts)
+	}
+}
+
+// startHTTPProxy starts an HTTP/HTTPS proxy that filters connections using the given hostFilter.
 // It returns the listener port, a close function, and any error.
-func startHTTPProxy(allowedHosts []string) (int, func(), error) {
+func startHTTPProxy(filter hostFilter) (int, func(), error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, nil, fmt.Errorf("http proxy listen: %w", err)
@@ -47,9 +64,9 @@ func startHTTPProxy(allowedHosts []string) (int, func(), error) {
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodConnect {
-				handleConnect(w, r, allowedHosts)
+				handleConnect(w, r, filter)
 			} else {
-				handleHTTP(w, r, allowedHosts)
+				handleHTTP(w, r, filter)
 			}
 		}),
 	}
@@ -62,8 +79,8 @@ func startHTTPProxy(allowedHosts []string) (int, func(), error) {
 	return port, closer, nil
 }
 
-func handleConnect(w http.ResponseWriter, r *http.Request, allowedHosts []string) {
-	if !matchHost(r.Host, allowedHosts) {
+func handleConnect(w http.ResponseWriter, r *http.Request, filter hostFilter) {
+	if !filter(r.Host) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -103,8 +120,8 @@ func handleConnect(w http.ResponseWriter, r *http.Request, allowedHosts []string
 	}()
 }
 
-func handleHTTP(w http.ResponseWriter, r *http.Request, allowedHosts []string) {
-	if !matchHost(r.URL.Host, allowedHosts) {
+func handleHTTP(w http.ResponseWriter, r *http.Request, filter hostFilter) {
+	if !filter(r.URL.Host) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -126,22 +143,22 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, allowedHosts []string) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// hostRuleSet implements socks5.RuleSet to filter connections by allowed hosts.
-type hostRuleSet struct {
-	allowedHosts []string
+// filterRuleSet implements socks5.RuleSet using a hostFilter.
+type filterRuleSet struct {
+	filter hostFilter
 }
 
-func (r *hostRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
+func (r *filterRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
 	host := req.DestAddr.FQDN
 	if host == "" {
 		host = req.DestAddr.IP.String()
 	}
-	return ctx, matchHost(host, r.allowedHosts)
+	return ctx, r.filter(host)
 }
 
-// startSOCKS5Proxy starts a SOCKS5 proxy that only allows connections to allowedHosts.
+// startSOCKS5Proxy starts a SOCKS5 proxy that filters connections using the given hostFilter.
 // Returns the listener port, a close function, and any error.
-func startSOCKS5Proxy(allowedHosts []string) (int, func(), error) {
+func startSOCKS5Proxy(filter hostFilter) (int, func(), error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, nil, fmt.Errorf("socks5 proxy listen: %w", err)
@@ -149,7 +166,7 @@ func startSOCKS5Proxy(allowedHosts []string) (int, func(), error) {
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	server := socks5.NewServer(
-		socks5.WithRule(&hostRuleSet{allowedHosts: allowedHosts}),
+		socks5.WithRule(&filterRuleSet{filter: filter}),
 	)
 
 	go server.Serve(listener)

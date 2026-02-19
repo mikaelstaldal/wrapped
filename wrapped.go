@@ -30,10 +30,15 @@ var envPassthrough = []string{
 }
 
 func Wrapped(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string,
+	allowAllHosts bool, deniedHosts []string) error {
 	if len(allowedHosts) > 0 {
 		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			extraEnv, workdir, apparmor, allowedHosts)
+			extraEnv, workdir, apparmor, allowListFilter(allowedHosts))
+	}
+	if allowAllHosts {
+		return wrappedFiltered(program, arguments, mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
+			extraEnv, workdir, apparmor, denyListFilter(deniedHosts))
 	}
 
 	bwrapArgs, err := buildBwrapArgs(program, arguments, network, mountCurrentDir, mountCurrentDirWritable,
@@ -53,20 +58,20 @@ func Wrapped(program string, arguments []string, network, mountCurrentDir, mount
 }
 
 func wrappedFiltered(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string) error {
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, filter hostFilter) error {
 	// Check socat is available.
 	if _, err := exec.LookPath("socat"); err != nil {
-		return fmt.Errorf("socat is required for --allow-host: %w", err)
+		return fmt.Errorf("socat is required for filtered network access: %w", err)
 	}
 
 	// Start proxy servers.
-	httpPort, httpClose, err := startHTTPProxy(allowedHosts)
+	httpPort, httpClose, err := startHTTPProxy(filter)
 	if err != nil {
 		return fmt.Errorf("failed to start HTTP proxy: %w", err)
 	}
 	defer httpClose()
 
-	socksPort, socksClose, err := startSOCKS5Proxy(allowedHosts)
+	socksPort, socksClose, err := startSOCKS5Proxy(filter)
 	if err != nil {
 		return fmt.Errorf("failed to start SOCKS5 proxy: %w", err)
 	}

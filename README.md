@@ -14,7 +14,7 @@ This is a Linux program, might also work in WSL in Windows (currently not tested
 
 Requires bubblewrap to be installed and the `bwrap` command to be in `PATH`.
 
-The `--allow-host` feature additionally requires `socat` to be installed and in `PATH`.
+The `--allow-host` and `--allow-all-hosts` features additionally require `socat` to be installed and in `PATH`.
 
 ## Install
 
@@ -34,6 +34,8 @@ wrapped [flags] -- program [arguments...]
 |------|-------------|
 | `--network` | Enable full network access |
 | `--allow-host <host>` | Allow network access to a specific host (repeatable, supports `*.example.com` wildcards) |
+| `--allow-all-hosts` | Allow network access to all hosts (use `--deny-host` to exclude specific hosts) |
+| `--deny-host <host>` | Deny network access to a specific host when using `--allow-all-hosts` (repeatable, supports `*.example.com` wildcards) |
 | `--current-dir` | Mount the current directory read-only |
 | `--current-dir-writable` | Mount the current directory writable |
 | `--mount <path>` | Mount additional directory read-only (repeatable) |
@@ -57,6 +59,11 @@ wrapped --network curl https://example.com
 Allow network access only to specific hosts:
 ```bash
 wrapped --allow-host example.com --allow-host '*.googleapis.com' curl https://example.com
+```
+
+Allow network access to all hosts except specific ones:
+```bash
+wrapped --allow-all-hosts --deny-host '*.evil.com' curl https://example.com
 ```
 
 Mount the current directory writable and pass environment variables:
