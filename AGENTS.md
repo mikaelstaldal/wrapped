@@ -13,7 +13,7 @@ The project is implemented in **Go**:
 ## Build & Run
 
 ```bash
-go build -o wrapped ./cmd/wrapped
+go build -tags netgo -o wrapped ./cmd/wrapped
 go vet ./...
 go test ./...
 ```

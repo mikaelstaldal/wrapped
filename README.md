@@ -1,10 +1,10 @@
 # wrapped
 
-Run a program in a sandbox using [bubblewrap](https://github.com/containers/bubblewrap).
+Run a program in a sandbox using Linux namespaces.
 
 ## Inspiration
 
-The network sandboxing is inspired by [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime). 
+The network sandboxing (`--network filtered`) is inspired by [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime). 
 Although it is quite inconvenient for a general sandboxing tool to be implemented in TypeScript and require a JavaScript runtime. 
 So this program is implemented in Go and can produce a standalone statically linked binary.
 
@@ -12,9 +12,9 @@ So this program is implemented in Go and can produce a standalone statically lin
 
 This is a Linux program, might also work in WSL in Windows (currently not tested). 
 
-Requires bubblewrap to be installed and the `bwrap` command to be in `PATH`.
+Requires [bubblewrap](https://github.com/containers/bubblewrap) to be installed and the `bwrap` command to be in `PATH`.
 
-The `--network bridge` mode requires [pasta](https://passt.top/) (from the passt project) to be installed and in `PATH`.
+The `--network bridge` mode requires [pasta](https://passt.top/) (from the passt project) and `unshare` to be installed and in `PATH`.
 
 The `--network filtered` mode (used with `--allow-host` and `--allow-all-hosts`) requires `socat` to be installed and in `PATH`.
 
@@ -29,7 +29,7 @@ go install -tags netgo github.com/mikaelstaldal/wrapped/cmd/wrapped@latest
 To build with version information baked in:
 
 ```bash
-go build -ldflags "-X main.version=1.0.0 -X main.commit=$(git rev-parse --short HEAD)" -o wrapped ./cmd/wrapped
+go build -tags netgo -ldflags "-X main.version=1.0.0 -X main.commit=$(git rev-parse --short HEAD)" -o wrapped ./cmd/wrapped
 ```
 
 Without `-ldflags`, `wrapped --version` prints `dev`.
