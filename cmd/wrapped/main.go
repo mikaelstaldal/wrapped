@@ -41,9 +41,9 @@ func main() {
 
 	rootCmd := &cobra.Command{
 		Version: versionStr,
-		Use:   "wrapped [flags] program [arguments...]",
-		Short: "Run a program in a sandbox using bubblewrap",
-		Args:  cobra.MinimumNArgs(1),
+		Use:     "wrapped [flags] program [arguments...]",
+		Short:   "Run a program in a sandbox using Linux namespaces",
+		Args:    cobra.MinimumNArgs(1),
 		// Avoid printing usage/errors on every RunE error — we handle them in main().
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -109,7 +109,7 @@ func main() {
 	f.BoolVar(&allowAllHosts, "allow-all-hosts", false, "Allow network access to all hosts (implies --network filtered, use --deny-host to exclude specific hosts)")
 	f.StringArrayVar(&deniedHosts, "deny-host", nil, "Deny network access to specific host when using --allow-all-hosts (can be repeated, supports *.example.com wildcards)")
 	f.StringVar(&networkLogFile, "network-log", "", "Log all network connections to file (requires --network filtered)")
-	f.BoolVar(&networkSandboxOnly, "no-filesystem-sandbox", false, "Only sandbox the network, leave filesystem untouched")
+	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 

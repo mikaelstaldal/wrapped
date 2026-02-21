@@ -4,7 +4,7 @@ Run a program in a sandbox using Linux namespaces.
 
 ## Inspiration
 
-The network sandboxing (`--network filtered`) is inspired by [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime). 
+The filtered network sandboxing (`--network filtered`) is inspired by [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime). 
 Although it is quite inconvenient for a general sandboxing tool to be implemented in TypeScript and require a JavaScript runtime. 
 So this program is implemented in Go and can produce a standalone statically linked binary.
 
@@ -56,7 +56,7 @@ wrapped [flags] -- program [arguments...]
 | `-w`, `--workdir <path>` | Working directory inside the sandbox |
 | `--network-log <file>` | Log all network connections to a file (requires `--network filtered`) |
 | `--apparmor <profile>` | Run program with an AppArmor profile |
-| `--no-filesystem-sandbox` | Only sandbox the network, leave filesystem untouched |
+| `--only-network` | Only sandbox the network, leave filesystem untouched |
 
 #### Network modes
 
@@ -101,17 +101,17 @@ wrapped --current-dir-writable -e HOME -e MY_VAR=value program
 
 Run with network isolation only (no filesystem sandbox):
 ```bash
-wrapped --no-filesystem-sandbox curl https://example.com
+wrapped --only-network curl https://example.com
 ```
 
-Network-only sandbox with pasta networking:
+Network-only sandbox with pasta bridge networking:
 ```bash
-wrapped --no-filesystem-sandbox --network bridge curl https://example.com
+wrapped --only-network --network bridge curl https://example.com
 ```
 
 Network-only sandbox with filtered network access:
 ```bash
-wrapped --no-filesystem-sandbox --allow-host example.com curl https://example.com
+wrapped --only-network --allow-host example.com curl https://example.com
 ```
 
 ## License

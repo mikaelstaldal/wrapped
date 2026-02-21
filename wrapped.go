@@ -52,27 +52,36 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string,
 	allowAllHosts bool, deniedHosts []string, networkLogFile string, networkSandboxOnly bool) error {
 	if networkSandboxOnly {
-		// Validate incompatible flags.
-		if networkMode == NetworkHost {
-			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --network host")
-		}
 		if mountCurrentDir || mountCurrentDirWritable {
-			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --current-dir or --current-dir-writable")
+			return fmt.Errorf("--only-network cannot be combined with --current-dir or --current-dir-writable")
 		}
 		if len(mountReadonly) > 0 {
-			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --mount")
+			return fmt.Errorf("--only-network cannot be combined with --mount")
 		}
 		if len(mountWritable) > 0 {
-			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --mount-writable")
+			return fmt.Errorf("--only-network cannot be combined with --mount-writable")
 		}
 		if workdir != "" {
-			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --workdir")
+			return fmt.Errorf("--only-network cannot be combined with --workdir")
 		}
 		if len(extraEnv) > 0 {
-			return fmt.Errorf("--no-filesystem-sandbox cannot be combined with --env")
+			return fmt.Errorf("--only-network cannot be combined with --env")
 		}
 
-		if networkMode == NetworkFiltered {
+		switch networkMode {
+		case NetworkNone:
+			return fmt.Errorf("--only-network cannot be combined with --network none")
+
+		case NetworkHost:
+			return fmt.Errorf("--only-network cannot be combined with --network host")
+
+		case NetworkBridge:
+			if networkLogFile != "" {
+				return fmt.Errorf("--network-log requires --network filtered")
+			}
+			return wrappedPastaNetworkOnly(program, arguments, apparmor)
+
+		case NetworkFiltered:
 			if len(allowedHosts) > 0 {
 				return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
 			}
@@ -80,16 +89,6 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 				return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
 			}
 		}
-
-		if networkLogFile != "" {
-			return fmt.Errorf("--network-log requires --network filtered")
-		}
-
-		if networkMode == NetworkBridge {
-			return wrappedPastaNetworkOnly(program, arguments, apparmor)
-		}
-
-		return wrappedNetworkSandboxOnly(program, arguments, apparmor)
 	}
 
 	if networkMode == NetworkBridge {
@@ -361,24 +360,39 @@ func hasIPv6Route() bool {
 // runPastaCommand runs pasta in command mode, where pasta creates the user+network
 // namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
 // coordination protocol that causes ECHILD errors with --unshare-pid.
-func runPastaCommand(name string, args []string) error {
+func runPastaCommand(name string, args []string, fixDns bool) error {
 	pastaPath, err := exec.LookPath("pasta")
 	if err != nil {
-		return fmt.Errorf("pasta is required for --network bridge: %w", err)
+		return fmt.Errorf("pasta is required: %w", err)
 	}
 
 	pastaArgs := []string{
 		"--config-net",
 		"-t", "none", "-u", "none", // Disable host-to-namespace port forwarding.
 		"-T", "none", "-U", "none", // Disable namespace-to-host splice forwarding.
-		"--ns-ifname", "eth0",
 	}
 	if !hasIPv6Route() {
 		pastaArgs = append(pastaArgs, "-4")
 	}
-	pastaArgs = append(pastaArgs, "--")
-	pastaArgs = append(pastaArgs, name)
-	pastaArgs = append(pastaArgs, args...)
+
+	// DNS: mount /run/systemd/resolve so if the /etc/resolv.conf symlink target exists,
+	// then overlay stub-resolv.conf with the non-stub version containing real upstream
+	// DNS servers (the stub resolver is not reachable from pasta's namespace).
+	nonStubResolv := systemdResolve + "/resolv.conf"
+	if _, statErr := os.Stat(nonStubResolv); fixDns && statErr == nil {
+		pastaArgs = append(pastaArgs, "--", "sh", "-c")
+
+		quotedArgs := make([]string, len(args))
+		for i, arg := range args {
+			quotedArgs[i] = shellQuote(arg)
+		}
+
+		pastaArgs = append(pastaArgs, fmt.Sprintf("mount --bind %s /etc/resolv.conf && exec %s %s", shellQuote(nonStubResolv), shellQuote(name), strings.Join(quotedArgs, " ")))
+	} else {
+		pastaArgs = append(pastaArgs, "--")
+		pastaArgs = append(pastaArgs, name)
+		pastaArgs = append(pastaArgs, args...)
+	}
 
 	cmd := exec.Command(pastaPath, pastaArgs...)
 	cmd.Stdin = os.Stdin
@@ -444,8 +458,7 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		args = append(args, "--ro-bind", programDir, programDir)
 	}
 
-	// No --unshare-net: pasta creates the network namespace in command mode.
-	args = append(args, "--unshare-uts")
+	// No --unshare-net or --unshare-uts: pasta creates the network and uts namespace in command mode.
 
 	// DNS: mount /run/systemd/resolve so the /etc/resolv.conf symlink target exists,
 	// then overlay stub-resolv.conf with the non-stub version containing real upstream
@@ -468,26 +481,19 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to find bwrap: %w", err)
 	}
 
-	return runPastaCommand(bwrapPath, args)
+	return runPastaCommand(bwrapPath, args, false)
 }
 
 func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string) error {
-	bwrapPath, err := exec.LookPath("bwrap")
+	unsharePath, err := exec.LookPath("unshare")
 	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
+		return fmt.Errorf("failed to find unshare: %w", err)
 	}
 
 	args := []string{
-		"--dev-bind", "/", "/",
-		"--unshare-user",
-		"--uid", fmt.Sprintf("%d", os.Getuid()),
-		"--gid", fmt.Sprintf("%d", os.Getgid()),
-	}
-
-	// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
-	nonStubResolv := systemdResolve + "/resolv.conf"
-	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
-		args = append(args, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
+		"--user",
+		"--map-user", fmt.Sprintf("%d", os.Getuid()),
+		"--map-group", fmt.Sprintf("%d", os.Getgid()),
 	}
 
 	if apparmor != "" {
@@ -496,22 +502,7 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 	args = append(args, program)
 	args = append(args, arguments...)
 
-	return runPastaCommand(bwrapPath, args)
-}
-
-func wrappedNetworkSandboxOnly(program string, arguments []string, apparmor string) error {
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
-	}
-
-	argv := []string{"bwrap", "--dev-bind", "/", "/", "--unshare-user", "--unshare-net"}
-	if apparmor != "" {
-		argv = append(argv, "aa-exec", "-p", apparmor, "--")
-	}
-	argv = append(argv, program)
-	argv = append(argv, arguments...)
-	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
+	return runPastaCommand(unsharePath, args, true)
 }
 
 // buildFilteredBwrapArgs builds bwrap args for the full filesystem sandbox with filtered network.
@@ -689,4 +680,14 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 	)
 
 	return args, nil
+}
+
+// shellQuote quotes a string for safe use in a shell command.
+func shellQuote(s string) string {
+	// If string contains no special characters, return as-is
+	if s != "" && !strings.ContainsAny(s, " \t\n'\"\\$`!*?[](){};<>|&") {
+		return s
+	}
+	// Use single quotes and escape any single quotes in the string
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
