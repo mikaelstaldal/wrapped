@@ -14,7 +14,7 @@ This is a Linux program, might also work in WSL in Windows (currently not tested
 
 Requires [bubblewrap](https://github.com/containers/bubblewrap) to be installed and the `bwrap` command to be in `PATH`.
 
-The `--network bridge` mode requires [pasta](https://passt.top/) (from the passt project) and `unshare` to be installed and in `PATH`.
+The `--network bridge` mode requires [pasta](https://passt.top/) (from the passt project) to be installed and in `PATH`.
 
 The `--network filtered` mode (used with `--allow-host` and `--allow-all-hosts`) requires `socat` to be installed and in `PATH`.
 

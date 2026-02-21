@@ -82,12 +82,15 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 			return wrappedPastaNetworkOnly(program, arguments, apparmor)
 
 		case NetworkFiltered:
+			var filter hostFilter
 			if len(allowedHosts) > 0 {
-				return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
+				filter = allowListFilter(allowedHosts)
+			} else if allowAllHosts {
+				filter = denyListFilter(deniedHosts)
+			} else {
+				return fmt.Errorf("--network filtered requires filter specification")
 			}
-			if allowAllHosts {
-				return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildNetworkOnlyBwrapArgs)
-			}
+			return wrappedFiltered(program, arguments, apparmor, filter, networkLogFile, buildNetworkOnlyBwrapArgs)
 		}
 	}
 
@@ -335,11 +338,11 @@ func isParentOrEqual(parent, child string) bool {
 
 // hasIPv6Route reports whether the host has a non-loopback interface with a global unicast IPv6 address.
 func hasIPv6Route() bool {
-	ifaces, err := net.Interfaces()
+	interfaces, err := net.Interfaces()
 	if err != nil {
 		return false
 	}
-	for _, iface := range ifaces {
+	for _, iface := range interfaces {
 		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
 			continue
 		}
@@ -360,7 +363,7 @@ func hasIPv6Route() bool {
 // runPastaCommand runs pasta in command mode, where pasta creates the user+network
 // namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
 // coordination protocol that causes ECHILD errors with --unshare-pid.
-func runPastaCommand(name string, args []string, fixDns bool) error {
+func runPastaCommand(name string, args []string) error {
 	pastaPath, err := exec.LookPath("pasta")
 	if err != nil {
 		return fmt.Errorf("pasta is required: %w", err)
@@ -375,24 +378,9 @@ func runPastaCommand(name string, args []string, fixDns bool) error {
 		pastaArgs = append(pastaArgs, "-4")
 	}
 
-	// DNS: mount /run/systemd/resolve so if the /etc/resolv.conf symlink target exists,
-	// then overlay stub-resolv.conf with the non-stub version containing real upstream
-	// DNS servers (the stub resolver is not reachable from pasta's namespace).
-	nonStubResolv := systemdResolve + "/resolv.conf"
-	if _, statErr := os.Stat(nonStubResolv); fixDns && statErr == nil {
-		pastaArgs = append(pastaArgs, "--", "sh", "-c")
-
-		quotedArgs := make([]string, len(args))
-		for i, arg := range args {
-			quotedArgs[i] = shellQuote(arg)
-		}
-
-		pastaArgs = append(pastaArgs, fmt.Sprintf("mount --bind %s /etc/resolv.conf && exec %s %s", shellQuote(nonStubResolv), shellQuote(name), strings.Join(quotedArgs, " ")))
-	} else {
-		pastaArgs = append(pastaArgs, "--")
-		pastaArgs = append(pastaArgs, name)
-		pastaArgs = append(pastaArgs, args...)
-	}
+	pastaArgs = append(pastaArgs, "--")
+	pastaArgs = append(pastaArgs, name)
+	pastaArgs = append(pastaArgs, args...)
 
 	cmd := exec.Command(pastaPath, pastaArgs...)
 	cmd.Stdin = os.Stdin
@@ -481,19 +469,26 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to find bwrap: %w", err)
 	}
 
-	return runPastaCommand(bwrapPath, args, false)
+	return runPastaCommand(bwrapPath, args)
 }
 
 func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string) error {
-	unsharePath, err := exec.LookPath("unshare")
+	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
-		return fmt.Errorf("failed to find unshare: %w", err)
+		return fmt.Errorf("failed to find bwrap: %w", err)
 	}
 
 	args := []string{
-		"--user",
-		"--map-user", fmt.Sprintf("%d", os.Getuid()),
-		"--map-group", fmt.Sprintf("%d", os.Getgid()),
+		"--dev-bind", "/", "/",
+		"--unshare-user",
+		"--uid", fmt.Sprintf("%d", os.Getuid()),
+		"--gid", fmt.Sprintf("%d", os.Getgid()),
+	}
+
+	// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
+	nonStubResolv := systemdResolve + "/resolv.conf"
+	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+		args = append(args, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
 	}
 
 	if apparmor != "" {
@@ -502,7 +497,7 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 	args = append(args, program)
 	args = append(args, arguments...)
 
-	return runPastaCommand(unsharePath, args, true)
+	return runPastaCommand(bwrapPath, args)
 }
 
 // buildFilteredBwrapArgs builds bwrap args for the full filesystem sandbox with filtered network.
@@ -680,14 +675,4 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 	)
 
 	return args, nil
-}
-
-// shellQuote quotes a string for safe use in a shell command.
-func shellQuote(s string) string {
-	// If string contains no special characters, return as-is
-	if s != "" && !strings.ContainsAny(s, " \t\n'\"\\$`!*?[](){};<>|&") {
-		return s
-	}
-	// Use single quotes and escape any single quotes in the string
-	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
