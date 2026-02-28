@@ -42,30 +42,30 @@ wrapped [flags] -- program [arguments...]
 
 ### Flags
 
-| Flag | Description |
-|------|-------------|
-| `--network <mode>` | Network mode: `none` (default), `host`, `bridge`, or `filtered` |
-| `--allow-host <host>` | Allow network access to a specific host (repeatable, supports `*.example.com` wildcards, implies `--network filtered`) |
-| `--allow-all-hosts` | Allow network access to all hosts (implies `--network filtered`, use `--deny-host` to exclude specific hosts) |
-| `--deny-host <host>` | Deny network access to a specific host when using `--allow-all-hosts` (repeatable, supports `*.example.com` wildcards) |
-| `--current-dir` | Mount the current directory read-only |
-| `--current-dir-writable` | Mount the current directory writable |
-| `--mount <path>` | Mount additional directory read-only (repeatable) |
-| `--mount-writable <path>` | Mount additional directory writable (repeatable) |
-| `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable) |
-| `-w`, `--workdir <path>` | Working directory inside the sandbox |
-| `--network-log <file>` | Log all network connections to a file (requires `--network filtered`) |
-| `--apparmor <profile>` | Run program with an AppArmor profile |
-| `--only-network` | Only sandbox the network, leave filesystem untouched |
+| Flag                        | Description                                                                                                            |
+|-----------------------------|------------------------------------------------------------------------------------------------------------------------|
+| `--network <mode>`          | Network mode: `none` (default), `host`, `bridge`, or `filtered`                                                        |
+| `--allow-host <host>`       | Allow network access to a specific host (repeatable, supports `*.example.com` wildcards, implies `--network filtered`) |
+| `--allow-all-hosts`         | Allow network access to all hosts (implies `--network filtered`, use `--deny-host` to exclude specific hosts)          |
+| `--deny-host <host>`        | Deny network access to a specific host when using `--allow-all-hosts` (repeatable, supports `*.example.com` wildcards) |
+| `--current-dir`             | Mount the current directory read-only                                                                                  |
+| `--current-dir-writable`    | Mount the current directory writable                                                                                   |
+| `--mount <path>`            | Mount additional directory read-only (repeatable)                                                                      |
+| `--mount-writable <path>`   | Mount additional directory writable (repeatable)                                                                       |
+| `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable)                                                                                 |
+| `-w`, `--workdir <path>`    | Working directory inside the sandbox                                                                                   |
+| `--network-log <file>`      | Log all network connections to a file (requires `--network filtered`)                                                  |
+| `--apparmor <profile>`      | Run program with an AppArmor profile                                                                                   |
+| `--only-network`            | Only sandbox the network, leave filesystem untouched                                                                   |
 
 #### Network modes
 
-| Mode | Description |
-|------|-------------|
-| `none` | No network access (default). The network namespace is fully isolated. |
-| `host` | Full network access with no isolation. |
-| `bridge` | Transparent network access via [pasta](https://passt.top/). The sandbox has its own network namespace but can reach the Internet. |
-| `filtered` | Network access filtered by domain via HTTP/SOCKS5 proxies. Use with `--allow-host` or `--allow-all-hosts`. Requires `socat`. |
+| Mode       | Description                                                                                                                       |
+|------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `none`     | No network access (default). The network namespace is fully isolated.                                                             |
+| `host`     | Full network access with no isolation.                                                                                            |
+| `bridge`   | Transparent network access via [pasta](https://passt.top/). The sandbox has its own network namespace but can reach the Internet. |
+| `filtered` | Network access filtered by domain via HTTP/SOCKS5 proxies. Use with `--allow-host` or `--allow-all-hosts`. Requires `socat`.      |
 
 ### Examples
 
@@ -113,6 +113,11 @@ Network-only sandbox with filtered network access:
 ```bash
 wrapped --only-network --allow-host example.com curl https://example.com
 ```
+
+### Note
+
+The directory where the program to run is in is implicitly mounted read-only if not explicitly mentioned with 
+`--mount` or `--mount-writable`, which means that the program to run will be able to read other files in that directory.
 
 ## License
 
