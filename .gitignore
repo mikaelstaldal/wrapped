@@ -1,1 +1,6 @@
-/wrapped
+ignored/
+.claude
+wrapped
+TODO.md
+DOING.md
+DONE.md
