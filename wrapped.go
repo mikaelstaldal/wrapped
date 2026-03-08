@@ -50,8 +50,11 @@ const (
 
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	allowAllHosts bool, deniedHosts []string, networkLogFile string, networkSandboxOnly bool) error {
+	allowAllHosts bool, deniedHosts []string, networkLogFile string, networkSandboxOnly bool, allEnv bool) error {
 	if networkSandboxOnly {
+		if allEnv {
+			return fmt.Errorf("--only-network cannot be combined with --all-env")
+		}
 		if mountCurrentDir || mountCurrentDirWritable {
 			return fmt.Errorf("--only-network cannot be combined with --current-dir or --current-dir-writable")
 		}
@@ -96,16 +99,16 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 
 	if networkMode == NetworkBridge {
 		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, extraEnv, workdir, apparmor)
+			mountReadonly, mountWritable, extraEnv, workdir, apparmor, allEnv)
 	}
 
 	if networkMode == NetworkFiltered {
 		if len(allowedHosts) > 0 {
-			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
 			return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildArgs)
 		}
 		if allowAllHosts {
-			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
 			return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildArgs)
 		}
 	}
@@ -115,7 +118,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	}
 
 	bwrapArgs, err := buildBwrapArgs(program, arguments, networkMode == NetworkHost, mountCurrentDir, mountCurrentDirWritable,
-		mountReadonly, mountWritable, extraEnv, workdir, apparmor)
+		mountReadonly, mountWritable, extraEnv, workdir, apparmor, allEnv)
 	if err != nil {
 		return err
 	}
@@ -137,14 +140,14 @@ type filteredBwrapArgsBuilder func(httpSock, socksSock string) (bwrapPath string
 
 // newFullSandboxBwrapArgsBuilder returns a builder that uses the full filesystem sandbox.
 func newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir string) filteredBwrapArgsBuilder {
+	mountReadonly, mountWritable, extraEnv []string, workdir string, allEnv bool) filteredBwrapArgsBuilder {
 	return func(httpSock, socksSock string) (string, []string, error) {
 		filterConfig := &filteredNetConfig{
 			httpSock:  httpSock,
 			socksSock: socksSock,
 		}
 		bwrapArgs, err := buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, extraEnv, workdir, filterConfig)
+			mountReadonly, mountWritable, extraEnv, workdir, filterConfig, allEnv)
 		if err != nil {
 			return "", nil, err
 		}
@@ -414,15 +417,11 @@ func runPastaCommand(name string, args []string) error {
 }
 
 func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) error {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allEnv bool) error {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
 	if err != nil {
 		return err
 	}
-
-	// Explicitly set UID/GID so that bwrap maps the current user correctly inside
-	// the nested user namespace (pasta's user namespace has its own UID mapping).
-	args = append(args, "--uid", fmt.Sprintf("%d", os.Getuid()), "--gid", fmt.Sprintf("%d", os.Getgid()))
 
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
@@ -445,6 +444,10 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		!(mountCurrentDir && cwd == programDir) {
 		args = append(args, "--ro-bind", programDir, programDir)
 	}
+
+	// Explicitly set UID/GID so that bwrap maps the current user correctly inside
+	// the nested user namespace (pasta's user namespace has its own UID mapping).
+	args = append(args, "--uid", fmt.Sprintf("%d", os.Getuid()), "--gid", fmt.Sprintf("%d", os.Getgid()))
 
 	// No --unshare-net or --unshare-uts: pasta creates the network and uts namespace in command mode.
 
@@ -503,8 +506,8 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 // buildFilteredBwrapArgs builds bwrap args for the full filesystem sandbox with filtered network.
 // It returns args up to (but not including) the program command — the caller appends the shell command.
 func buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir string, filterCfg *filteredNetConfig) ([]string, error) {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+	mountReadonly, mountWritable, extraEnv []string, workdir string, filterCfg *filteredNetConfig, allEnv bool) ([]string, error) {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -537,8 +540,8 @@ func buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string) ([]string, error) {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir)
+	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allEnv bool) ([]string, error) {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +589,7 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 // buildBaseBwrapArgs builds the common bwrap args shared by all full-sandbox modes:
 // filesystem mounts, current directory, mount points, environment, and core namespace isolation.
 func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir string) ([]string, error) {
+	mountReadonly, mountWritable, extraEnv []string, workdir string, allEnv bool) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -647,13 +650,15 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 		args = append(args, "--bind", resolved, resolved)
 	}
 
-	args = append(args, "--clearenv")
-	for _, k := range envPassthrough {
-		if v, ok := os.LookupEnv(k); ok {
-			args = append(args, "--setenv", k, v)
+	if !allEnv {
+		args = append(args, "--clearenv")
+		for _, k := range envPassthrough {
+			if v, ok := os.LookupEnv(k); ok {
+				args = append(args, "--setenv", k, v)
+			}
 		}
+		args = append(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	}
-	args = append(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 
 	for _, e := range extraEnv {
 		if k, v, ok := strings.Cut(e, "="); ok {

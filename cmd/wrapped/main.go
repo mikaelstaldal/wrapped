@@ -29,6 +29,7 @@ func main() {
 		deniedHosts        []string
 		networkLogFile     string
 		networkSandboxOnly bool
+		allEnv             bool
 	)
 
 	versionStr := "dev"
@@ -92,6 +93,7 @@ func main() {
 				deniedHosts,
 				networkLogFile,
 				networkSandboxOnly,
+				allEnv,
 			)
 		},
 	}
@@ -110,8 +112,10 @@ func main() {
 	f.StringArrayVar(&deniedHosts, "deny-host", nil, "Deny network access to specific host when using --allow-all-hosts (can be repeated, supports *.example.com wildcards)")
 	f.StringVar(&networkLogFile, "network-log", "", "Log all network connections to file (requires --network filtered)")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
+	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "all-env")
 
 	if err := rootCmd.Execute(); err != nil {
 		var exitErr *wrapped.ExitError
