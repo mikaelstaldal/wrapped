@@ -52,6 +52,7 @@ wrapped [flags] -- program [arguments...]
 | `--current-dir-writable`    | Mount the current directory writable                                                                                   |
 | `--mount <path>`            | Mount additional directory read-only (repeatable)                                                                      |
 | `--mount-writable <path>`   | Mount additional directory writable (repeatable)                                                                       |
+| `--symlink <dest>=<src>`    | Create a symlink from SRC to DEST (repeatable, specify as `--symlink DEST=SRC`)                                        |
 | `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable)                                                                                 |
 | `-w`, `--workdir <path>`    | Working directory inside the sandbox                                                                                   |
 | `--network-log <file>`      | Log all network connections to a file (requires `--network filtered`)                                                  |

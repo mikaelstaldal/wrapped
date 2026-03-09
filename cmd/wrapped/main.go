@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"wrapped"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,7 @@ func main() {
 		allowedHosts       []string
 		allowAllHosts      bool
 		deniedHosts        []string
+		symlinks           []string
 		networkLogFile     string
 		networkSandboxOnly bool
 		allEnv             bool
@@ -77,6 +79,15 @@ func main() {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var wrappedSymlinks []wrapped.Symlink
+			for _, s := range symlinks {
+				dest, src, ok := strings.Cut(s, "=")
+				if !ok {
+					return fmt.Errorf("invalid --symlink %q: must be DEST=SRC", s)
+				}
+				wrappedSymlinks = append(wrappedSymlinks, wrapped.Symlink{Src: src, Dest: dest})
+			}
+
 			return wrapped.Wrapped(
 				args[0],
 				args[1:],
@@ -85,6 +96,7 @@ func main() {
 				currentDirWritable,
 				mounts,
 				mountsWritable,
+				wrappedSymlinks,
 				envFlags,
 				workdir,
 				apparmor,
@@ -104,6 +116,7 @@ func main() {
 	f.BoolVar(&currentDirWritable, "current-dir-writable", false, "Mount the current directory writable")
 	f.StringArrayVar(&mounts, "mount", nil, "Mount additional directory read-only")
 	f.StringArrayVar(&mountsWritable, "mount-writable", nil, "Mount additional directory writable")
+	f.StringArrayVar(&symlinks, "symlink", nil, "Create a symlink from SRC to DEST (repeatable, specify as --symlink DEST=SRC)")
 	f.StringArrayVarP(&envFlags, "env", "e", nil, "Pass environment variable")
 	f.StringVarP(&workdir, "workdir", "w", "", "Working directory")
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")

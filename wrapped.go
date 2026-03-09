@@ -48,8 +48,13 @@ const (
 	NetworkFiltered = "filtered"
 )
 
+type Symlink struct {
+	Src  string
+	Dest string
+}
+
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allowedHosts []string,
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
 	allowAllHosts bool, deniedHosts []string, networkLogFile string, networkSandboxOnly bool, allEnv bool) error {
 	if networkSandboxOnly {
 		if allEnv {
@@ -63,6 +68,9 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		}
 		if len(mountWritable) > 0 {
 			return fmt.Errorf("--only-network cannot be combined with --mount-writable")
+		}
+		if len(symlinks) > 0 {
+			return fmt.Errorf("--only-network cannot be combined with --symlink")
 		}
 		if workdir != "" {
 			return fmt.Errorf("--only-network cannot be combined with --workdir")
@@ -99,16 +107,16 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 
 	if networkMode == NetworkBridge {
 		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, extraEnv, workdir, apparmor, allEnv)
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv)
 	}
 
 	if networkMode == NetworkFiltered {
 		if len(allowedHosts) > 0 {
-			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
+			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
 			return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildArgs)
 		}
 		if allowAllHosts {
-			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
+			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
 			return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildArgs)
 		}
 	}
@@ -118,7 +126,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	}
 
 	bwrapArgs, err := buildBwrapArgs(program, arguments, networkMode == NetworkHost, mountCurrentDir, mountCurrentDirWritable,
-		mountReadonly, mountWritable, extraEnv, workdir, apparmor, allEnv)
+		mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv)
 	if err != nil {
 		return err
 	}
@@ -140,14 +148,14 @@ type filteredBwrapArgsBuilder func(httpSock, socksSock string) (bwrapPath string
 
 // newFullSandboxBwrapArgsBuilder returns a builder that uses the full filesystem sandbox.
 func newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir string, allEnv bool) filteredBwrapArgsBuilder {
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool) filteredBwrapArgsBuilder {
 	return func(httpSock, socksSock string) (string, []string, error) {
 		filterConfig := &filteredNetConfig{
 			httpSock:  httpSock,
 			socksSock: socksSock,
 		}
 		bwrapArgs, err := buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, extraEnv, workdir, filterConfig, allEnv)
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, filterConfig, allEnv)
 		if err != nil {
 			return "", nil, err
 		}
@@ -417,8 +425,8 @@ func runPastaCommand(name string, args []string) error {
 }
 
 func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allEnv bool) error {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool) error {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
 	if err != nil {
 		return err
 	}
@@ -506,8 +514,8 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 // buildFilteredBwrapArgs builds bwrap args for the full filesystem sandbox with filtered network.
 // It returns args up to (but not including) the program command — the caller appends the shell command.
 func buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir string, filterCfg *filteredNetConfig, allEnv bool) ([]string, error) {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, filterCfg *filteredNetConfig, allEnv bool) ([]string, error) {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -540,8 +548,8 @@ func buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir, apparmor string, allEnv bool) ([]string, error) {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, extraEnv, workdir, allEnv)
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool) ([]string, error) {
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -589,7 +597,7 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 // buildBaseBwrapArgs builds the common bwrap args shared by all full-sandbox modes:
 // filesystem mounts, current directory, mount points, environment, and core namespace isolation.
 func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable, extraEnv []string, workdir string, allEnv bool) ([]string, error) {
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -648,6 +656,10 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 			return nil, fmt.Errorf("mount point %q not found: %w", path, err)
 		}
 		args = append(args, "--bind", resolved, resolved)
+	}
+
+	for _, symlink := range symlinks {
+		args = append(args, "--symlink", symlink.Src, symlink.Dest)
 	}
 
 	if !allEnv {
