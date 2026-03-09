@@ -4,7 +4,6 @@ package wrapped
 import (
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -55,7 +54,7 @@ type Symlink struct {
 
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	allowAllHosts bool, deniedHosts []string, networkLogFile string, networkSandboxOnly bool, allEnv bool) error {
+	networkSandboxOnly bool, allEnv bool) error {
 	if networkSandboxOnly {
 		if allEnv {
 			return fmt.Errorf("--only-network cannot be combined with --all-env")
@@ -87,21 +86,11 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 			return fmt.Errorf("--only-network cannot be combined with --network host")
 
 		case NetworkBridge:
-			if networkLogFile != "" {
-				return fmt.Errorf("--network-log requires --network filtered")
-			}
 			return wrappedPastaNetworkOnly(program, arguments, apparmor)
 
 		case NetworkFiltered:
-			var filter hostFilter
-			if len(allowedHosts) > 0 {
-				filter = allowListFilter(allowedHosts)
-			} else if allowAllHosts {
-				filter = denyListFilter(deniedHosts)
-			} else {
-				return fmt.Errorf("--network filtered requires filter specification")
-			}
-			return wrappedFiltered(program, arguments, apparmor, filter, networkLogFile, buildNetworkOnlyBwrapArgs)
+			return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
+				false, false, nil, nil, nil, nil, "", false, true)
 		}
 	}
 
@@ -111,18 +100,9 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	}
 
 	if networkMode == NetworkFiltered {
-		if len(allowedHosts) > 0 {
-			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
-			return wrappedFiltered(program, arguments, apparmor, allowListFilter(allowedHosts), networkLogFile, buildArgs)
-		}
-		if allowAllHosts {
-			buildArgs := newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
-			return wrappedFiltered(program, arguments, apparmor, denyListFilter(deniedHosts), networkLogFile, buildArgs)
-		}
-	}
-
-	if networkLogFile != "" {
-		return fmt.Errorf("--network-log requires --network filtered")
+		return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
+			mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
+			symlinks, extraEnv, workdir, allEnv, false)
 	}
 
 	bwrapArgs, err := buildBwrapArgs(program, arguments, networkMode == NetworkHost, mountCurrentDir, mountCurrentDirWritable,
@@ -141,180 +121,155 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
 }
 
-// filteredBwrapArgsBuilder builds the bwrap command for filtered network mode.
-// It receives the Unix socket paths and returns the bwrap path and args.
-// The args must NOT include the program/arguments — those are appended by wrappedFiltered.
-type filteredBwrapArgsBuilder func(httpSock, socksSock string) (bwrapPath string, args []string, err error)
-
-// newFullSandboxBwrapArgsBuilder returns a builder that uses the full filesystem sandbox.
-func newFullSandboxBwrapArgsBuilder(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool) filteredBwrapArgsBuilder {
-	return func(httpSock, socksSock string) (string, []string, error) {
-		filterConfig := &filteredNetConfig{
-			httpSock:  httpSock,
-			socksSock: socksSock,
-		}
-		bwrapArgs, err := buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, symlinks, extraEnv, workdir, filterConfig, allEnv)
+// resolveHosts resolves hostnames to IP addresses, deduplicates, and optionally filters IPv6.
+func resolveHosts(hosts []string, ipv6 bool) ([]string, error) {
+	seen := make(map[string]bool)
+	var ips []string
+	for _, host := range hosts {
+		addrs, err := net.LookupHost(host)
 		if err != nil {
-			return "", nil, err
+			return nil, fmt.Errorf("failed to resolve host %q: %w", host, err)
 		}
-
-		bwrapPath, err := exec.LookPath("bwrap")
-		if err != nil {
-			return "", nil, fmt.Errorf("failed to find bwrap: %w", err)
+		for _, addr := range addrs {
+			if seen[addr] {
+				continue
+			}
+			ip := net.ParseIP(addr)
+			if ip == nil {
+				continue
+			}
+			if !ipv6 && ip.To4() == nil {
+				continue
+			}
+			seen[addr] = true
+			ips = append(ips, addr)
 		}
-
-		return bwrapPath, bwrapArgs, nil
 	}
+	return ips, nil
 }
 
-// buildNetworkOnlyBwrapArgs builds bwrap args for network-only sandboxing (no filesystem sandbox).
-func buildNetworkOnlyBwrapArgs(httpSock, socksSock string) (string, []string, error) {
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to find bwrap: %w", err)
+// buildNftRules returns a shell script that sets up nftables rules to allow only the given IPs.
+func buildNftRules(allowedIPs []string) string {
+	var ipv4, ipv6 []string
+	for _, addr := range allowedIPs {
+		ip := net.ParseIP(addr)
+		if ip.To4() != nil {
+			ipv4 = append(ipv4, addr)
+		} else {
+			ipv6 = append(ipv6, addr)
+		}
 	}
 
-	args := []string{
-		"--dev-bind", "/", "/",
-		"--unshare-user", "--unshare-net",
-		"--setenv", "HTTP_PROXY", "http://localhost:3128",
-		"--setenv", "HTTPS_PROXY", "http://localhost:3128",
-		"--setenv", "http_proxy", "http://localhost:3128",
-		"--setenv", "https_proxy", "http://localhost:3128",
-		"--setenv", "ALL_PROXY", "socks5h://localhost:1080",
-		"--setenv", "all_proxy", "socks5h://localhost:1080",
-		"--setenv", "NO_PROXY", "localhost,127.0.0.1,::1",
-		"--setenv", "no_proxy", "localhost,127.0.0.1,::1",
+	script := "nft add table inet filter && " +
+		"nft add chain inet filter output '{ type filter hook output priority 0; policy drop; }' && " +
+		"nft add rule inet filter output ct state established,related accept && " +
+		"nft add rule inet filter output oifname lo accept && " +
+		"nft add rule inet filter output meta l4proto '{ tcp, udp }' th dport 53 accept"
+
+	if len(ipv4) > 0 {
+		script += " && nft add rule inet filter output ip daddr '{ " + strings.Join(ipv4, ", ") + " }' accept"
+	}
+	if len(ipv6) > 0 {
+		script += " && nft add rule inet filter output ip6 daddr '{ " + strings.Join(ipv6, ", ") + " }' accept"
 	}
 
-	return bwrapPath, args, nil
+	return script
 }
 
-func wrappedFiltered(program string, arguments []string, apparmor string, filter hostFilter,
-	networkLogFile string, buildArgs filteredBwrapArgsBuilder) error {
-	// Check socat is available.
-	if _, err := exec.LookPath("socat"); err != nil {
-		return fmt.Errorf("socat is required for filtered network access: %w", err)
+func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
+	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
+	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool) error {
+	if _, err := exec.LookPath("nft"); err != nil {
+		return fmt.Errorf("nft (nftables) is required for filtered network access: %w", err)
 	}
 
-	// Set up a network logger if requested.
-	var netLog *networkLogger
-	if networkLogFile != "" {
-		f, err := os.OpenFile(networkLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to open network log file: %w", err)
-		}
-		defer f.Close()
-		netLog = newNetworkLogger(f)
-	}
-
-	// Start proxy servers.
-	httpPort, httpClose, err := startHTTPProxy(filter, netLog)
-	if err != nil {
-		return fmt.Errorf("failed to start HTTP proxy: %w", err)
-	}
-	defer httpClose()
-
-	socksPort, socksClose, err := startSOCKS5Proxy(filter, netLog)
-	if err != nil {
-		return fmt.Errorf("failed to start SOCKS5 proxy: %w", err)
-	}
-	defer socksClose()
-
-	// Create temp Unix socket paths.
-	httpSock := fmt.Sprintf("/tmp/wrapped-http-%d.sock", os.Getpid())
-	socksSock := fmt.Sprintf("/tmp/wrapped-socks-%d.sock", os.Getpid())
-	defer os.Remove(httpSock)
-	defer os.Remove(socksSock)
-
-	// Start host-side socat bridges.
-	// Use Setpgid so forked socat children are in the same process group and can be killed together.
-	httpBridge := exec.Command("socat",
-		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", httpSock),
-		fmt.Sprintf("TCP:127.0.0.1:%d", httpPort))
-	httpBridge.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := httpBridge.Start(); err != nil {
-		return fmt.Errorf("failed to start HTTP socat bridge: %w", err)
-	}
-	defer func(pid int) {
-		err := syscall.Kill(pid, syscall.SIGTERM)
-		if err != nil {
-			log.Printf("failed to kill socat: %v", err)
-		}
-	}(-httpBridge.Process.Pid)
-
-	socksBridge := exec.Command("socat",
-		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socksSock),
-		fmt.Sprintf("TCP:127.0.0.1:%d", socksPort))
-	socksBridge.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := socksBridge.Start(); err != nil {
-		return fmt.Errorf("failed to start SOCKS5 socat bridge: %w", err)
-	}
-	defer func(pid int) {
-		err := syscall.Kill(pid, syscall.SIGTERM)
-		if err != nil {
-			log.Printf("failed to kill socat: %v", err)
-		}
-	}(-socksBridge.Process.Pid)
-
-	// Build bwrap args.
-	bwrapPath, bwrapArgs, err := buildArgs(httpSock, socksSock)
+	ipv6 := hasIPv6Route()
+	allowedIPs, err := resolveHosts(allowedHosts, ipv6)
 	if err != nil {
 		return err
 	}
 
-	// Build the shell command that runs inside the sandbox.
-	// Run socat bridges in the background, then the program as a foreground child.
-	// When the program exits, kill the background socat processes and exit with the program's status.
-	shellCmd := fmt.Sprintf(
-		"socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & "+
-			"socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 & ",
-		httpSock, socksSock)
-	if apparmor != "" {
-		shellCmd += fmt.Sprintf("aa-exec -p %s -- ", apparmor)
-	}
-	shellCmd += `"$0" "$@"; S=$?; kill 0; exit $S`
+	nftScript := buildNftRules(allowedIPs)
 
-	bwrapArgs = append(bwrapArgs, "sh", "-c", shellCmd, program)
+	var bwrapArgs []string
+	if networkSandboxOnly {
+		bwrapArgs = []string{
+			"--dev-bind", "/", "/",
+			"--unshare-user",
+			"--uid", fmt.Sprintf("%d", os.Getuid()),
+			"--gid", fmt.Sprintf("%d", os.Getgid()),
+		}
+
+		// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
+		nonStubResolv := systemdResolve + "/resolv.conf"
+		if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+			bwrapArgs = append(bwrapArgs, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
+		}
+	} else {
+		bwrapArgs, err = buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable,
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
+		if err != nil {
+			return err
+		}
+
+		resolvedProgram, err := resolveProgram(program)
+		if err != nil {
+			return err
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get current directory: %w", err)
+		}
+
+		// Bind-mount the program if not already covered by an existing mount.
+		mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
+		if !isProgramCovered(resolvedProgram, mountedDirs) {
+			bwrapArgs = append(bwrapArgs, "--ro-bind", resolvedProgram, resolvedProgram)
+		}
+
+		bwrapArgs = append(bwrapArgs,
+			"--uid", fmt.Sprintf("%d", os.Getuid()),
+			"--gid", fmt.Sprintf("%d", os.Getgid()),
+		)
+
+		// DNS: mount /run/systemd/resolve so the /etc/resolv.conf symlink target exists,
+		// then overlay stub-resolv.conf with the non-stub version.
+		nonStubResolv := systemdResolve + "/resolv.conf"
+		if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+			bwrapArgs = append(bwrapArgs,
+				"--ro-bind", systemdResolve, systemdResolve,
+				"--ro-bind", nonStubResolv, systemdResolve+"/stub-resolv.conf")
+		}
+
+		program = resolvedProgram
+	}
+
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	if apparmor != "" {
+		bwrapArgs = append(bwrapArgs, "aa-exec", "-p", apparmor, "--")
+	}
+	bwrapArgs = append(bwrapArgs, program)
 	bwrapArgs = append(bwrapArgs, arguments...)
 
-	// Run bwrap as a child process.
-	cmd := exec.Command(bwrapPath, bwrapArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start bwrap: %w", err)
+	// Build a shell command that runs nft rules first (inside pasta's namespace,
+	// before bwrap), then execs bwrap. This ensures nft has CAP_NET_ADMIN from
+	// pasta's user namespace rather than bwrap's.
+	shellCmd := nftScript + " && exec " + shellQuote(bwrapPath)
+	for _, arg := range bwrapArgs {
+		shellCmd += " " + shellQuote(arg)
 	}
 
-	// Forward signals to the child.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		for sig := range sigCh {
-			_ = cmd.Process.Signal(sig)
-		}
-	}()
-
-	err = cmd.Wait()
-	signal.Stop(sigCh)
-
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return &ExitError{Code: exitErr.ExitCode()}
-		}
-		return fmt.Errorf("bwrap failed: %w", err)
-	}
-	return nil
+	return runPastaCommand("sh", []string{"-c", shellCmd})
 }
 
-type filteredNetConfig struct {
-	httpSock  string
-	socksSock string
+// shellQuote returns s wrapped in single quotes, safe for use in a shell command.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func resolveProgram(program string) (string, error) {
@@ -491,42 +446,6 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 	args = append(args, arguments...)
 
 	return runPastaCommand(bwrapPath, args)
-}
-
-// buildFilteredBwrapArgs builds bwrap args for the full filesystem sandbox with filtered network.
-// It returns args up to (but not including) the program command — the caller appends the shell command.
-func buildFilteredBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, filterCfg *filteredNetConfig, allEnv bool) ([]string, error) {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
-	if err != nil {
-		return nil, err
-	}
-
-	args = append(args, "--unshare-net", "--unshare-uts")
-
-	// Bind-mount Unix sockets into the sandbox.
-	args = append(args, "--bind", filterCfg.httpSock, filterCfg.httpSock)
-	args = append(args, "--bind", filterCfg.socksSock, filterCfg.socksSock)
-
-	// Set proxy environment variables.
-	args = append(args,
-		"--setenv", "HTTP_PROXY", "http://localhost:3128",
-		"--setenv", "HTTPS_PROXY", "http://localhost:3128",
-		"--setenv", "http_proxy", "http://localhost:3128",
-		"--setenv", "https_proxy", "http://localhost:3128",
-		"--setenv", "ALL_PROXY", "socks5h://localhost:1080",
-		"--setenv", "all_proxy", "socks5h://localhost:1080",
-		"--setenv", "NO_PROXY", "localhost,127.0.0.1,::1",
-		"--setenv", "no_proxy", "localhost,127.0.0.1,::1",
-	)
-
-	// DNS: mount /run/systemd/resolve if present.
-	info, err := os.Stat(systemdResolve)
-	if err == nil && info.IsDir() {
-		args = append(args, "--ro-bind", systemdResolve, systemdResolve)
-	}
-
-	return args, nil
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,

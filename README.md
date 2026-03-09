@@ -2,12 +2,6 @@
 
 Run a program in a sandbox using Linux namespaces.
 
-## Inspiration
-
-The filtered network sandboxing (`--network filtered`) is inspired by [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime). 
-Although it is quite inconvenient for a general sandboxing tool to be implemented in TypeScript and require a JavaScript runtime. 
-So this program is implemented in Go and can produce a standalone statically linked binary.
-
 ## Prerequisites
 
 This is a Linux program, might also work in WSL in Windows (currently not tested). 
@@ -16,7 +10,7 @@ Requires [bubblewrap](https://github.com/containers/bubblewrap) to be installed 
 
 The `--network bridge` mode requires [pasta](https://passt.top/) (from the passt project) to be installed and in `PATH`.
 
-The `--network filtered` mode (used with `--allow-host` and `--allow-all-hosts`) requires `socat` to be installed and in `PATH`.
+The `--network filtered` mode (used with `--allow-host`) requires [pasta](https://passt.top/) and `nft` (from the nftables project) to be installed and in `PATH`.
 
 ## Install
 
@@ -45,9 +39,7 @@ wrapped [flags] -- program [arguments...]
 | Flag                        | Description                                                                                                            |
 |-----------------------------|------------------------------------------------------------------------------------------------------------------------|
 | `--network <mode>`          | Network mode: `none` (default), `host`, `bridge`, or `filtered`                                                        |
-| `--allow-host <host>`       | Allow network access to a specific host (repeatable, supports `*.example.com` wildcards, implies `--network filtered`) |
-| `--allow-all-hosts`         | Allow network access to all hosts (implies `--network filtered`, use `--deny-host` to exclude specific hosts)          |
-| `--deny-host <host>`        | Deny network access to a specific host when using `--allow-all-hosts` (repeatable, supports `*.example.com` wildcards) |
+| `--allow-host <host>`       | Allow network access to a specific host (repeatable, implies `--network filtered`)                                     |
 | `--current-dir`             | Mount the current directory read-only                                                                                  |
 | `--current-dir-writable`    | Mount the current directory writable                                                                                   |
 | `--mount <path>`            | Mount additional directory read-only (repeatable)                                                                      |
@@ -55,18 +47,17 @@ wrapped [flags] -- program [arguments...]
 | `--symlink <dest>=<src>`    | Create a symlink from SRC to DEST (repeatable, specify as `--symlink DEST=SRC`)                                        |
 | `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable)                                                                                 |
 | `-w`, `--workdir <path>`    | Working directory inside the sandbox                                                                                   |
-| `--network-log <file>`      | Log all network connections to a file (requires `--network filtered`)                                                  |
 | `--apparmor <profile>`      | Run program with an AppArmor profile                                                                                   |
 | `--only-network`            | Only sandbox the network, leave filesystem untouched                                                                   |
 
 #### Network modes
 
-| Mode       | Description                                                                                                                       |
-|------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| `none`     | No network access (default). The network namespace is fully isolated.                                                             |
-| `host`     | Full network access with no isolation.                                                                                            |
-| `bridge`   | Transparent network access via [pasta](https://passt.top/). The sandbox has its own network namespace but can reach the Internet. |
-| `filtered` | Network access filtered by domain via HTTP/SOCKS5 proxies. Use with `--allow-host` or `--allow-all-hosts`. Requires `socat`.      |
+| Mode       | Description                                                                                                                                                    |
+|------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `none`     | No network access (default). The network namespace is fully isolated.                                                                                          |
+| `host`     | Full network access with no isolation.                                                                                                                         |
+| `bridge`   | Transparent network access via [pasta](https://passt.top/). The sandbox has its own network namespace and cannot reach localhost, but can reach the Internet.  |
+| `filtered` | Network access filtered by IP via nftables rules inside a pasta namespace. Hosts are resolved at startup. Use with `--allow-host`. Requires `pasta` and `nft`. |
 
 ### Examples
 
@@ -85,14 +76,9 @@ Run with transparent network access via pasta (sandboxed but with full connectiv
 wrapped --network bridge curl https://example.com
 ```
 
-Allow network access only to specific hosts:
+Allow network access only to specific hosts (hosts are resolved to IPs at startup):
 ```bash
-wrapped --allow-host example.com --allow-host '*.googleapis.com' curl https://example.com
-```
-
-Allow network access to all hosts except specific ones:
-```bash
-wrapped --allow-all-hosts --deny-host '*.evil.com' curl https://example.com
+wrapped --allow-host example.com --allow-host googleapis.com curl https://example.com
 ```
 
 Mount the current directory writable and pass environment variables:
