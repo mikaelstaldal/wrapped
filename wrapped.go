@@ -335,18 +335,6 @@ func resolveProgram(program string) (string, error) {
 	return filepath.EvalSymlinks(absPath)
 }
 
-// isParentOrEqual reports whether parent is a path prefix of (or equal to) child.
-func isParentOrEqual(parent, child string) bool {
-	if parent == child {
-		return true
-	}
-	prefix := parent
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-	return strings.HasPrefix(child, prefix)
-}
-
 // hasIPv6Route reports whether the host has a non-loopback interface with a global unicast IPv6 address.
 func hasIPv6Route() bool {
 	interfaces, err := net.Interfaces()
@@ -442,14 +430,9 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Bind-mount the program's directory if not already covered.
-	if mountCurrentDir && programDir != cwd {
-		args = append(args, "--ro-bind", programDir, programDir)
-	}
-	if !strings.HasPrefix(programDir, "/usr") &&
-		!strings.HasPrefix(programDir, "/bin") &&
-		!strings.HasPrefix(programDir, "/sbin") &&
-		!(mountCurrentDir && cwd == programDir) {
+	// Bind-mount the program's directory if not already covered by an existing mount.
+	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
+	if !isProgramDirCovered(programDir, mountedDirs) {
 		args = append(args, "--ro-bind", programDir, programDir)
 	}
 
@@ -565,14 +548,9 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Bind-mount the program's directory if not already covered.
-	if mountCurrentDir && programDir != cwd {
-		args = append(args, "--ro-bind", programDir, programDir)
-	}
-	if !strings.HasPrefix(programDir, "/usr") &&
-		!strings.HasPrefix(programDir, "/bin") &&
-		!strings.HasPrefix(programDir, "/sbin") &&
-		!(mountCurrentDir && cwd == programDir) {
+	// Bind-mount the program's directory if not already covered by an existing mount.
+	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
+	if !isProgramDirCovered(programDir, mountedDirs) {
 		args = append(args, "--ro-bind", programDir, programDir)
 	}
 
@@ -692,4 +670,47 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 	)
 
 	return args, nil
+}
+
+// collectMountedDirs returns the list of directories that are already mounted in the sandbox.
+func collectMountedDirs(mountCurrentDir bool, cwd string, mountReadonly, mountWritable []string) []string {
+	dirs := []string{"/usr", "/etc"}
+	if mountCurrentDir {
+		dirs = append(dirs, cwd)
+	}
+	for _, path := range mountReadonly {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			dirs = append(dirs, resolved)
+		}
+	}
+	for _, path := range mountWritable {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			dirs = append(dirs, resolved)
+		}
+	}
+	return dirs
+}
+
+// isProgramDirCovered reports whether programDir is already covered by one of the mounted directories.
+func isProgramDirCovered(programDir string, mountedDirs []string) bool {
+	for _, dir := range mountedDirs {
+		if isParentOrEqual(dir, programDir) {
+			return true
+		}
+	}
+	return false
+}
+
+// isParentOrEqual reports whether parent is a path prefix of (or equal to) child.
+func isParentOrEqual(parent, child string) bool {
+	if parent == child {
+		return true
+	}
+	prefix := parent
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return strings.HasPrefix(child, prefix)
 }
