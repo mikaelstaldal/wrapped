@@ -117,8 +117,8 @@ wrapped --only-network --allow-host example.com curl https://example.com
 
 ### Note
 
-The directory where the program to run is in is implicitly mounted read-only if not explicitly mentioned with 
-`--mount` or `--mount-writable`, which means that the program to run will be able to read other files in that directory.
+The program to run (the file only, not the directory) is implicitly mounted read-only if not covered by any 
+`--mount` or `--mount-writable` or automatic mount (`/usr`, `/etc`).
 
 ## License
 

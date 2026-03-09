@@ -423,17 +423,16 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 	if err != nil {
 		return err
 	}
-	programDir := filepath.Dir(resolvedProgram)
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Bind-mount the program's directory if not already covered by an existing mount.
+	// Bind-mount the program if not already covered by an existing mount.
 	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
-	if !isProgramDirCovered(programDir, mountedDirs) {
-		args = append(args, "--ro-bind", programDir, programDir)
+	if !isProgramCovered(resolvedProgram, mountedDirs) {
+		args = append(args, "--ro-bind", resolvedProgram, resolvedProgram)
 	}
 
 	// Explicitly set UID/GID so that bwrap maps the current user correctly inside
@@ -541,17 +540,16 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 	if err != nil {
 		return nil, err
 	}
-	programDir := filepath.Dir(resolvedProgram)
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Bind-mount the program's directory if not already covered by an existing mount.
+	// Bind-mount the program if not already covered by an existing mount.
 	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
-	if !isProgramDirCovered(programDir, mountedDirs) {
-		args = append(args, "--ro-bind", programDir, programDir)
+	if !isProgramCovered(resolvedProgram, mountedDirs) {
+		args = append(args, "--ro-bind", resolvedProgram, resolvedProgram)
 	}
 
 	if network {
@@ -693,10 +691,10 @@ func collectMountedDirs(mountCurrentDir bool, cwd string, mountReadonly, mountWr
 	return dirs
 }
 
-// isProgramDirCovered reports whether programDir is already covered by one of the mounted directories.
-func isProgramDirCovered(programDir string, mountedDirs []string) bool {
+// isProgramCovered reports whether programDir is already covered by one of the mounted directories.
+func isProgramCovered(program string, mountedDirs []string) bool {
 	for _, dir := range mountedDirs {
-		if isParentOrEqual(dir, programDir) {
+		if isParentOrEqual(dir, program) {
 			return true
 		}
 	}
