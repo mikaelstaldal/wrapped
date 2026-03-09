@@ -121,6 +121,85 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
 }
 
+func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
+	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
+	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool) error {
+	if _, err := exec.LookPath("nft"); err != nil {
+		return fmt.Errorf("nft (nftables) is required for filtered network access: %w", err)
+	}
+
+	ipv6 := hasIPv6Route()
+	allowedIPs, err := resolveHosts(allowedHosts, ipv6)
+	if err != nil {
+		return err
+	}
+
+	nftScript := buildNftRules(allowedIPs)
+
+	var bwrapArgs []string
+	if networkSandboxOnly {
+		bwrapArgs = []string{
+			"--dev-bind", "/", "/",
+			"--unshare-user",
+			"--uid", fmt.Sprintf("%d", os.Getuid()),
+			"--gid", fmt.Sprintf("%d", os.Getgid()),
+		}
+
+		// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
+		nonStubResolv := systemdResolve + "/resolv.conf"
+		if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+			bwrapArgs = append(bwrapArgs, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
+		}
+	} else {
+		resolvedProgram, err := resolveProgram(program)
+		if err != nil {
+			return err
+		}
+
+		bwrapArgs, err = buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram)
+		if err != nil {
+			return err
+		}
+
+		bwrapArgs = append(bwrapArgs,
+			"--uid", fmt.Sprintf("%d", os.Getuid()),
+			"--gid", fmt.Sprintf("%d", os.Getgid()),
+		)
+
+		// DNS: mount /run/systemd/resolve so the /etc/resolv.conf symlink target exists,
+		// then overlay stub-resolv.conf with the non-stub version.
+		nonStubResolv := systemdResolve + "/resolv.conf"
+		if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+			bwrapArgs = append(bwrapArgs,
+				"--ro-bind", systemdResolve, systemdResolve,
+				"--ro-bind", nonStubResolv, systemdResolve+"/stub-resolv.conf")
+		}
+
+		program = resolvedProgram
+	}
+
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	if apparmor != "" {
+		bwrapArgs = append(bwrapArgs, "aa-exec", "-p", apparmor, "--")
+	}
+	bwrapArgs = append(bwrapArgs, program)
+	bwrapArgs = append(bwrapArgs, arguments...)
+
+	// Build a shell command that runs nft rules first (inside pasta's namespace,
+	// before bwrap), then execs bwrap. This ensures nft has CAP_NET_ADMIN from
+	// pasta's user namespace rather than bwrap's.
+	shellCmd := nftScript + " && exec " + shellQuote(bwrapPath)
+	for _, arg := range bwrapArgs {
+		shellCmd += " " + shellQuote(arg)
+	}
+
+	return runPastaCommand("sh", []string{"-c", shellCmd})
+}
+
 // resolveHosts resolves hostnames to IP addresses, deduplicates, and optionally filters IPv6.
 func resolveHosts(hosts []string, ipv6 bool) ([]string, error) {
 	seen := make(map[string]bool)
@@ -176,97 +255,6 @@ func buildNftRules(allowedIPs []string) string {
 	return script
 }
 
-func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
-	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
-	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool) error {
-	if _, err := exec.LookPath("nft"); err != nil {
-		return fmt.Errorf("nft (nftables) is required for filtered network access: %w", err)
-	}
-
-	ipv6 := hasIPv6Route()
-	allowedIPs, err := resolveHosts(allowedHosts, ipv6)
-	if err != nil {
-		return err
-	}
-
-	nftScript := buildNftRules(allowedIPs)
-
-	var bwrapArgs []string
-	if networkSandboxOnly {
-		bwrapArgs = []string{
-			"--dev-bind", "/", "/",
-			"--unshare-user",
-			"--uid", fmt.Sprintf("%d", os.Getuid()),
-			"--gid", fmt.Sprintf("%d", os.Getgid()),
-		}
-
-		// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
-		nonStubResolv := systemdResolve + "/resolv.conf"
-		if _, statErr := os.Stat(nonStubResolv); statErr == nil {
-			bwrapArgs = append(bwrapArgs, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
-		}
-	} else {
-		bwrapArgs, err = buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
-		if err != nil {
-			return err
-		}
-
-		resolvedProgram, err := resolveProgram(program)
-		if err != nil {
-			return err
-		}
-
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-
-		// Bind-mount the program if not already covered by an existing mount.
-		mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
-		if !isProgramCovered(resolvedProgram, mountedDirs) {
-			bwrapArgs = append(bwrapArgs, "--ro-bind", resolvedProgram, resolvedProgram)
-		}
-
-		bwrapArgs = append(bwrapArgs,
-			"--uid", fmt.Sprintf("%d", os.Getuid()),
-			"--gid", fmt.Sprintf("%d", os.Getgid()),
-		)
-
-		// DNS: mount /run/systemd/resolve so the /etc/resolv.conf symlink target exists,
-		// then overlay stub-resolv.conf with the non-stub version.
-		nonStubResolv := systemdResolve + "/resolv.conf"
-		if _, statErr := os.Stat(nonStubResolv); statErr == nil {
-			bwrapArgs = append(bwrapArgs,
-				"--ro-bind", systemdResolve, systemdResolve,
-				"--ro-bind", nonStubResolv, systemdResolve+"/stub-resolv.conf")
-		}
-
-		program = resolvedProgram
-	}
-
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
-	}
-
-	if apparmor != "" {
-		bwrapArgs = append(bwrapArgs, "aa-exec", "-p", apparmor, "--")
-	}
-	bwrapArgs = append(bwrapArgs, program)
-	bwrapArgs = append(bwrapArgs, arguments...)
-
-	// Build a shell command that runs nft rules first (inside pasta's namespace,
-	// before bwrap), then execs bwrap. This ensures nft has CAP_NET_ADMIN from
-	// pasta's user namespace rather than bwrap's.
-	shellCmd := nftScript + " && exec " + shellQuote(bwrapPath)
-	for _, arg := range bwrapArgs {
-		shellCmd += " " + shellQuote(arg)
-	}
-
-	return runPastaCommand("sh", []string{"-c", shellCmd})
-}
-
 // shellQuote returns s wrapped in single quotes, safe for use in a shell command.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
@@ -312,6 +300,48 @@ func hasIPv6Route() bool {
 		}
 	}
 	return false
+}
+
+func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool) error {
+	resolvedProgram, err := resolveProgram(program)
+	if err != nil {
+		return err
+	}
+
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram)
+	if err != nil {
+		return err
+	}
+
+	// Explicitly set UID/GID so that bwrap maps the current user correctly inside
+	// the nested user namespace (pasta's user namespace has its own UID mapping).
+	args = append(args, "--uid", fmt.Sprintf("%d", os.Getuid()), "--gid", fmt.Sprintf("%d", os.Getgid()))
+
+	// No --unshare-net or --unshare-uts: pasta creates the network and uts namespace in command mode.
+
+	// DNS: mount /run/systemd/resolve so the /etc/resolv.conf symlink target exists,
+	// then overlay stub-resolv.conf with the non-stub version containing real upstream
+	// DNS servers (the stub resolver at 127.0.0.53 is not reachable from pasta's namespace).
+	nonStubResolv := systemdResolve + "/resolv.conf"
+	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+		args = append(args,
+			"--ro-bind", systemdResolve, systemdResolve,
+			"--ro-bind", nonStubResolv, systemdResolve+"/stub-resolv.conf")
+	}
+
+	if apparmor != "" {
+		args = append(args, "aa-exec", "-p", apparmor, "--")
+	}
+	args = append(args, resolvedProgram)
+	args = append(args, arguments...)
+
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	return runPastaCommand(bwrapPath, args)
 }
 
 // runPastaCommand runs pasta in command mode, where pasta creates the user+network
@@ -367,59 +397,6 @@ func runPastaCommand(name string, args []string) error {
 	return nil
 }
 
-func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool) error {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
-	if err != nil {
-		return err
-	}
-
-	resolvedProgram, err := resolveProgram(program)
-	if err != nil {
-		return err
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Bind-mount the program if not already covered by an existing mount.
-	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
-	if !isProgramCovered(resolvedProgram, mountedDirs) {
-		args = append(args, "--ro-bind", resolvedProgram, resolvedProgram)
-	}
-
-	// Explicitly set UID/GID so that bwrap maps the current user correctly inside
-	// the nested user namespace (pasta's user namespace has its own UID mapping).
-	args = append(args, "--uid", fmt.Sprintf("%d", os.Getuid()), "--gid", fmt.Sprintf("%d", os.Getgid()))
-
-	// No --unshare-net or --unshare-uts: pasta creates the network and uts namespace in command mode.
-
-	// DNS: mount /run/systemd/resolve so the /etc/resolv.conf symlink target exists,
-	// then overlay stub-resolv.conf with the non-stub version containing real upstream
-	// DNS servers (the stub resolver at 127.0.0.53 is not reachable from pasta's namespace).
-	nonStubResolv := systemdResolve + "/resolv.conf"
-	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
-		args = append(args,
-			"--ro-bind", systemdResolve, systemdResolve,
-			"--ro-bind", nonStubResolv, systemdResolve+"/stub-resolv.conf")
-	}
-
-	if apparmor != "" {
-		args = append(args, "aa-exec", "-p", apparmor, "--")
-	}
-	args = append(args, resolvedProgram)
-	args = append(args, arguments...)
-
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
-	}
-
-	return runPastaCommand(bwrapPath, args)
-}
-
 func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string) error {
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
@@ -450,25 +427,14 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool) ([]string, error) {
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv)
-	if err != nil {
-		return nil, err
-	}
-
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return nil, err
 	}
 
-	cwd, err := os.Getwd()
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Bind-mount the program if not already covered by an existing mount.
-	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
-	if !isProgramCovered(resolvedProgram, mountedDirs) {
-		args = append(args, "--ro-bind", resolvedProgram, resolvedProgram)
+		return nil, err
 	}
 
 	if network {
@@ -491,8 +457,7 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 
 // buildBaseBwrapArgs builds the common bwrap args shared by all full-sandbox modes:
 // filesystem mounts, current directory, mount points, environment, and core namespace isolation.
-func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool) ([]string, error) {
+func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, resolvedProgram string) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -585,6 +550,12 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool,
 		"--unshare-pid",
 		"--unshare-cgroup-try",
 	)
+
+	// Bind-mount the program if not already covered by an existing mount.
+	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
+	if !isProgramCovered(resolvedProgram, mountedDirs) {
+		args = append(args, "--ro-bind", resolvedProgram, resolvedProgram)
+	}
 
 	return args, nil
 }
