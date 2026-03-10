@@ -546,11 +546,19 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
+	cwd, err = filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve current directory symlinks: %w", err)
+	}
 
 	if mountCurrentDir {
 		homeDir, ok := os.LookupEnv("HOME")
 		if !ok {
 			return nil, errors.New("HOME not set")
+		}
+		homeDir, err = filepath.EvalSymlinks(homeDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve home directory symlinks: %w", err)
 		}
 		if cwd == homeDir || isParentOrEqual(cwd, homeDir) {
 			return nil, errors.New("cannot run from home directory or its parent directories")
