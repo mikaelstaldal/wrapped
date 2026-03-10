@@ -27,6 +27,7 @@ func main() {
 		apparmor           string
 		allowedHosts       []string
 		symlinks           []string
+		tmpfs              []string
 		networkSandboxOnly bool
 		allEnv             bool
 	)
@@ -91,6 +92,7 @@ func main() {
 				allowedHosts,
 				networkSandboxOnly,
 				allEnv,
+				tmpfs,
 			)
 		},
 	}
@@ -106,6 +108,7 @@ func main() {
 	f.StringVarP(&workdir, "workdir", "w", "", "Working directory")
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
 	f.StringArrayVar(&allowedHosts, "allow-host", nil, "Allow network access to specific host (can be repeated, implies --network filtered)")
+	f.StringArrayVar(&tmpfs, "tmpfs", nil, "Mount a tmpfs at the given path (can be repeated)")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
 	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables")
 

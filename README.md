@@ -45,6 +45,7 @@ wrapped [flags] -- program [arguments...]
 | `--mount <path>`            | Mount additional directory read-only (repeatable)                                                                      |
 | `--mount-writable <path>`   | Mount additional directory writable (repeatable)                                                                       |
 | `--symlink <dest>=<src>`    | Create a symlink from SRC to DEST (repeatable, specify as `--symlink DEST=SRC`)                                        |
+| `--tmpfs <path>`            | Mount a tmpfs at the given path (repeatable)                                                                           |
 | `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable)                                                                                 |
 | `-w`, `--workdir <path>`    | Working directory inside the sandbox                                                                                   |
 | `--apparmor <profile>`      | Run program with an AppArmor profile                                                                                   |

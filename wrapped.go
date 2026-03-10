@@ -54,7 +54,7 @@ type Symlink struct {
 
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	networkSandboxOnly bool, allEnv bool) error {
+	networkSandboxOnly bool, allEnv bool, tmpfs []string) error {
 	if networkSandboxOnly {
 		if allEnv {
 			return fmt.Errorf("--only-network cannot be combined with --all-env")
@@ -77,6 +77,9 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		if len(extraEnv) > 0 {
 			return fmt.Errorf("--only-network cannot be combined with --env")
 		}
+		if len(tmpfs) > 0 {
+			return fmt.Errorf("--only-network cannot be combined with --tmpfs")
+		}
 
 		switch networkMode {
 		case NetworkNone:
@@ -90,23 +93,23 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 
 		case NetworkFiltered:
 			return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
-				false, false, nil, nil, nil, nil, "", false, true)
+				false, false, nil, nil, nil, nil, "", false, true, nil)
 		}
 	}
 
 	if networkMode == NetworkBridge {
 		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv)
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs)
 	}
 
 	if networkMode == NetworkFiltered {
 		return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
 			mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			symlinks, extraEnv, workdir, allEnv, false)
+			symlinks, extraEnv, workdir, allEnv, false, tmpfs)
 	}
 
 	bwrapArgs, err := buildBwrapArgs(program, arguments, networkMode == NetworkHost, mountCurrentDir, mountCurrentDirWritable,
-		mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv)
+		mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs)
 	if err != nil {
 		return err
 	}
@@ -123,7 +126,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 
 func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
 	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
-	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool) error {
+	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool, tmpfs []string) error {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return fmt.Errorf("nft (nftables) is required for filtered network access: %w", err)
 	}
@@ -156,7 +159,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 			return err
 		}
 
-		bwrapArgs, err = buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram)
+		bwrapArgs, err = buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs)
 		if err != nil {
 			return err
 		}
@@ -303,13 +306,13 @@ func hasIPv6Route() bool {
 }
 
 func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool) error {
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string) error {
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return err
 	}
 
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram)
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs)
 	if err != nil {
 		return err
 	}
@@ -426,13 +429,13 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool) ([]string, error) {
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string) ([]string, error) {
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return nil, err
 	}
 
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram)
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +460,7 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 
 // buildBaseBwrapArgs builds the common bwrap args shared by all full-sandbox modes:
 // filesystem mounts, current directory, mount points, environment, and core namespace isolation.
-func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, resolvedProgram string) ([]string, error) {
+func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, resolvedProgram string, tmpfs []string) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -520,6 +523,10 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 
 	for _, symlink := range symlinks {
 		args = append(args, "--symlink", symlink.Src, symlink.Dest)
+	}
+
+	for _, path := range tmpfs {
+		args = append(args, "--tmpfs", path)
 	}
 
 	if !allEnv {
