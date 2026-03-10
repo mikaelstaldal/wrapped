@@ -2,6 +2,7 @@
 package wrapped
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"net"
@@ -137,7 +138,8 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 		return err
 	}
 
-	nftScript := buildNftRules(allowedIPs)
+	resolverIPs := parseResolverIPs()
+	nftScript := buildNftRules(allowedIPs, resolverIPs)
 
 	var bwrapArgs []string
 	if networkSandboxOnly {
@@ -230,8 +232,48 @@ func resolveHosts(hosts []string, ipv6 bool) ([]string, error) {
 	return ips, nil
 }
 
+// parseResolverIPs reads nameserver entries from /run/systemd/resolve/resolv.conf,
+// falling back to /etc/resolv.conf, and returns their IP addresses.
+func parseResolverIPs() []string {
+	paths := []string{systemdResolve + "/resolv.conf", "/etc/resolv.conf"}
+	for _, path := range paths {
+		ips, err := parseResolvConf(path)
+		if err == nil {
+			return ips
+		}
+	}
+	return nil
+}
+
+// parseResolvConf extracts nameserver IPs from a resolv.conf file.
+func parseResolvConf(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var ips []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "nameserver") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if ip := net.ParseIP(fields[1]); ip != nil {
+			ips = append(ips, fields[1])
+		}
+	}
+	return ips, scanner.Err()
+}
+
 // buildNftRules returns a shell script that sets up nftables rules to allow only the given IPs.
-func buildNftRules(allowedIPs []string) string {
+// resolverIPs are the DNS resolver addresses that DNS traffic (port 53) is restricted to.
+func buildNftRules(allowedIPs []string, resolverIPs []string) string {
 	var ipv4, ipv6 []string
 	for _, addr := range allowedIPs {
 		ip := net.ParseIP(addr)
@@ -242,11 +284,35 @@ func buildNftRules(allowedIPs []string) string {
 		}
 	}
 
+	var dnsIPv4, dnsIPv6 []string
+	for _, addr := range resolverIPs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			dnsIPv4 = append(dnsIPv4, addr)
+		} else {
+			dnsIPv6 = append(dnsIPv6, addr)
+		}
+	}
+
 	script := "nft add table inet filter && " +
 		"nft add chain inet filter output '{ type filter hook output priority 0; policy drop; }' && " +
 		"nft add rule inet filter output ct state established,related accept && " +
-		"nft add rule inet filter output oifname lo accept && " +
-		"nft add rule inet filter output meta l4proto '{ tcp, udp }' th dport 53 accept"
+		"nft add rule inet filter output oifname lo accept"
+
+	if len(dnsIPv4) > 0 || len(dnsIPv6) > 0 {
+		if len(dnsIPv4) > 0 {
+			script += " && nft add rule inet filter output ip daddr '{ " + strings.Join(dnsIPv4, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
+		}
+		if len(dnsIPv6) > 0 {
+			script += " && nft add rule inet filter output ip6 daddr '{ " + strings.Join(dnsIPv6, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
+		}
+	} else {
+		// Fallback: allow DNS to any destination if no resolvers were found.
+		script += " && nft add rule inet filter output meta l4proto '{ tcp, udp }' th dport 53 accept"
+	}
 
 	if len(ipv4) > 0 {
 		script += " && nft add rule inet filter output ip daddr '{ " + strings.Join(ipv4, ", ") + " }' accept"
