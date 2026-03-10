@@ -48,6 +48,25 @@ const (
 	NetworkFiltered = "filtered"
 )
 
+// Individual /etc entries to bind-mount into the sandbox.
+// Files and directories are both supported; each is checked at runtime.
+var etcBindEntries = []string{
+	"resolv.conf",
+	"hosts",
+	"passwd",
+	"group",
+	"nsswitch.conf",
+	"ld.so.cache",
+	"ld.so.conf",
+	"ld.so.conf.d",
+	"localtime",
+	"ssl/certs",
+	"default/locale",
+	"locale.conf",
+	"timezone",
+	"lsb-release",
+}
+
 type Symlink struct {
 	Src  string
 	Dest string
@@ -535,7 +554,38 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		"--symlink", "/usr/lib64", "/lib64",
 		"--symlink", "/usr/bin", "/bin",
 		"--symlink", "/usr/sbin", "/sbin",
-		"--ro-bind", "/etc", "/etc",
+	)
+
+	// Bind-mount only the /etc files needed inside the sandbox,
+	// rather than exposing the entire /etc directory.
+	args = append(args, "--dir", "/etc")
+	etcParentDirs := make(map[string]bool)
+	for _, entry := range etcBindEntries {
+		src := "/etc/" + entry
+		info, err := os.Lstat(src)
+		if err != nil {
+			continue
+		}
+		// Ensure parent directories exist inside the sandbox for nested entries.
+		if dir := filepath.Dir(entry); dir != "." {
+			parentPath := "/etc/" + dir
+			if !etcParentDirs[parentPath] {
+				etcParentDirs[parentPath] = true
+				args = append(args, "--dir", parentPath)
+			}
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(src)
+			if err != nil {
+				continue
+			}
+			args = append(args, "--symlink", target, src)
+		} else {
+			args = append(args, "--ro-bind", src, src)
+		}
+	}
+
+	args = append(args,
 		"--perms", "1777",
 		"--tmpfs", "/tmp",
 		"--proc", "/proc",
@@ -649,7 +699,7 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 
 // collectMountedDirs returns the list of directories that are already mounted in the sandbox.
 func collectMountedDirs(mountCurrentDir bool, cwd string, mountReadonly, mountWritable []string) []string {
-	dirs := []string{"/usr", "/etc"}
+	dirs := []string{"/usr"}
 	if mountCurrentDir {
 		dirs = append(dirs, cwd)
 	}
