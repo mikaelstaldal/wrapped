@@ -585,12 +585,18 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		if err != nil {
 			return nil, fmt.Errorf("mount point %q not found: %w", path, err)
 		}
+		if isForbiddenMountTarget(resolved) {
+			return nil, fmt.Errorf("mount target %q is not allowed", path)
+		}
 		args = append(args, "--ro-bind", resolved, resolved)
 	}
 	for _, path := range mountWritable {
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			return nil, fmt.Errorf("mount point %q not found: %w", path, err)
+		}
+		if isForbiddenMountTarget(resolved) {
+			return nil, fmt.Errorf("mount target %q is not allowed", path)
 		}
 		args = append(args, "--bind", resolved, resolved)
 	}
@@ -668,6 +674,17 @@ func isProgramCovered(program string, mountedDirs []string) bool {
 		if isParentOrEqual(dir, program) {
 			return true
 		}
+	}
+	return false
+}
+
+// isForbiddenMountTarget reports whether the resolved path is a sensitive directory
+// that must not be used as a --mount or --mount-writable target.
+func isForbiddenMountTarget(resolved string) bool {
+	cleaned := filepath.Clean(resolved)
+	switch cleaned {
+	case "/", "/proc", "/dev", "/sys":
+		return true
 	}
 	return false
 }
