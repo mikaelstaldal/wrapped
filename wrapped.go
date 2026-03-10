@@ -446,7 +446,7 @@ func runPastaCommand(name string, args []string) error {
 
 	// Forward signals to the child.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
 		for sig := range sigCh {
 			_ = cmd.Process.Signal(sig)
