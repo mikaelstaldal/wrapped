@@ -101,12 +101,12 @@ The full host environment is passed to the bwrap *process*. While bwrap's `--cle
 
 ## Summary
 
-| Severity | Finding |
-|----------|---------|
-| HIGH | DNS tunneling possible in filtered mode (unrestricted port 53) |
-| MEDIUM | All of `/etc` exposed to sandbox |
-| MEDIUM | No `--die-with-parent` — orphaned sandboxes possible |
-| MEDIUM | Incomplete signal forwarding in pasta modes |
-| LOW | Home directory symlink bypass |
-| LOW | Full env passed to bwrap process in exec path |
-| LOW | No validation against dangerous mount targets |
+| Severity | Finding                                                        |
+|----------|----------------------------------------------------------------|
+| HIGH     | DNS tunneling possible in filtered mode (unrestricted port 53) |
+| MEDIUM   | All of `/etc` exposed to sandbox                               |
+| MEDIUM   | No `--die-with-parent` — orphaned sandboxes possible           |
+| MEDIUM   | Incomplete signal forwarding in pasta modes                    |
+| LOW      | Home directory symlink bypass                                  |
+| LOW      | Full env passed to bwrap process in exec path                  |
+| LOW      | No validation against dangerous mount targets                  |
