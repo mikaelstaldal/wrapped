@@ -30,6 +30,8 @@ func main() {
 		tmpfs              []string
 		networkSandboxOnly bool
 		allEnv             bool
+		exposeTCP          []string
+		exposeUDP          []string
 	)
 
 	versionStr := "dev"
@@ -93,6 +95,8 @@ func main() {
 				networkSandboxOnly,
 				allEnv,
 				tmpfs,
+				exposeTCP,
+				exposeUDP,
 			)
 		},
 	}
@@ -111,6 +115,8 @@ func main() {
 	f.StringArrayVar(&tmpfs, "tmpfs", nil, "Mount a tmpfs at the given path (can be repeated)")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
 	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables")
+	f.StringArrayVar(&exposeTCP, "expose-tcp", nil, "Expose TCP port from sandbox to host (bridge mode only, can be repeated)")
+	f.StringArrayVar(&exposeUDP, "expose-udp", nil, "Expose UDP port from sandbox to host (bridge mode only, can be repeated)")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "all-env")

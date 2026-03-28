@@ -74,7 +74,7 @@ type Symlink struct {
 
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	networkSandboxOnly bool, allEnv bool, tmpfs []string) error {
+	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string) error {
 	if networkSandboxOnly {
 		if allEnv {
 			return fmt.Errorf("--only-network cannot be combined with --all-env")
@@ -109,9 +109,12 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 			return fmt.Errorf("--only-network cannot be combined with --network host")
 
 		case NetworkBridge:
-			return wrappedPastaNetworkOnly(program, arguments, apparmor)
+			return wrappedPastaNetworkOnly(program, arguments, apparmor, exposeTCP, exposeUDP)
 
 		case NetworkFiltered:
+			if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
+				return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
+			}
 			return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
 				false, false, nil, nil, nil, nil, "", false, true, nil)
 		}
@@ -119,15 +122,21 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 
 	if networkMode == NetworkBridge {
 		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs)
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, exposeTCP, exposeUDP)
 	}
 
 	if networkMode == NetworkFiltered {
+		if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
+			return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
+		}
 		return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
 			mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
 			symlinks, extraEnv, workdir, allEnv, false, tmpfs)
 	}
 
+	if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
+		return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
+	}
 	bwrapArgs, err := buildBwrapArgs(program, arguments, networkMode == NetworkHost, mountCurrentDir, mountCurrentDirWritable,
 		mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs)
 	if err != nil {
@@ -221,7 +230,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 		shellCmd += " " + shellQuote(arg)
 	}
 
-	return runPastaCommand("sh", []string{"-c", shellCmd})
+	return runPastaCommand("sh", []string{"-c", shellCmd}, nil, nil)
 }
 
 // resolveHosts resolves hostnames to IP addresses, deduplicates, and optionally filters IPv6.
@@ -391,7 +400,8 @@ func hasIPv6Route() bool {
 }
 
 func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string) error {
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string,
+	exposeTCP, exposeUDP []string) error {
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return err
@@ -429,13 +439,41 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to find bwrap: %w", err)
 	}
 
-	return runPastaCommand(bwrapPath, args)
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP)
+}
+
+func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string, exposeTCP, exposeUDP []string) error {
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return fmt.Errorf("failed to find bwrap: %w", err)
+	}
+
+	args := []string{
+		"--dev-bind", "/", "/",
+		"--unshare-user",
+		"--uid", fmt.Sprintf("%d", os.Getuid()),
+		"--gid", fmt.Sprintf("%d", os.Getgid()),
+	}
+
+	// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
+	nonStubResolv := systemdResolve + "/resolv.conf"
+	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
+		args = append(args, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
+	}
+
+	if apparmor != "" {
+		args = append(args, "aa-exec", "-p", apparmor, "--")
+	}
+	args = append(args, program)
+	args = append(args, arguments...)
+
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP)
 }
 
 // runPastaCommand runs pasta in command mode, where pasta creates the user+network
 // namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
 // coordination protocol that causes ECHILD errors with --unshare-pid.
-func runPastaCommand(name string, args []string) error {
+func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) error {
 	pastaPath, err := exec.LookPath("pasta")
 	if err != nil {
 		return fmt.Errorf("pasta is required: %w", err)
@@ -443,8 +481,19 @@ func runPastaCommand(name string, args []string) error {
 
 	pastaArgs := []string{
 		"--config-net",
-		"-t", "none", "-u", "none", // Disable host-to-namespace port forwarding.
-		"-T", "none", "-U", "none", // Disable namespace-to-host splice forwarding.
+		"-T", "none", "-U", "none", // Disable host-to-namespace port forwarding.
+	}
+	// -t: namespace-to-host TCP port forwarding.
+	if len(exposeTCP) == 0 {
+		pastaArgs = append(pastaArgs, "-t", "none")
+	} else {
+		pastaArgs = append(pastaArgs, "-t", strings.Join(exposeTCP, ","))
+	}
+	// -u: namespace-to-host UDP port forwarding.
+	if len(exposeUDP) == 0 {
+		pastaArgs = append(pastaArgs, "-u", "none")
+	} else {
+		pastaArgs = append(pastaArgs, "-u", strings.Join(exposeUDP, ","))
 	}
 	if !hasIPv6Route() {
 		pastaArgs = append(pastaArgs, "-4")
@@ -483,34 +532,6 @@ func runPastaCommand(name string, args []string) error {
 		return fmt.Errorf("pasta failed: %w", err)
 	}
 	return nil
-}
-
-func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string) error {
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
-	}
-
-	args := []string{
-		"--dev-bind", "/", "/",
-		"--unshare-user",
-		"--uid", fmt.Sprintf("%d", os.Getuid()),
-		"--gid", fmt.Sprintf("%d", os.Getgid()),
-	}
-
-	// DNS: bind the non-stub resolv.conf so that DNS works in pasta's network namespace.
-	nonStubResolv := systemdResolve + "/resolv.conf"
-	if _, statErr := os.Stat(nonStubResolv); statErr == nil {
-		args = append(args, "--ro-bind", nonStubResolv, "/etc/resolv.conf")
-	}
-
-	if apparmor != "" {
-		args = append(args, "aa-exec", "-p", apparmor, "--")
-	}
-	args = append(args, program)
-	args = append(args, arguments...)
-
-	return runPastaCommand(bwrapPath, args)
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,

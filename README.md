@@ -49,6 +49,8 @@ wrapped [flags] -- program [arguments...]
 | `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable)                                                                                 |
 | `-w`, `--workdir <path>`    | Working directory inside the sandbox                                                                                   |
 | `--apparmor <profile>`      | Run program with an AppArmor profile                                                                                   |
+| `--expose-tcp <port>`       | Expose TCP port from sandbox to host (repeatable, bridge mode only)                                                    |
+| `--expose-udp <port>`       | Expose UDP port from sandbox to host (repeatable, bridge mode only)                                                    |
 | `--only-network`            | Only sandbox the network, leave filesystem untouched                                                                   |
 
 #### Network modes
