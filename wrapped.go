@@ -653,7 +653,7 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		}
 		mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
 		mountedDirs = append(mountedDirs, "/tmp")
-		if !isProgramCovered(resolvedWorkdir, mountedDirs) {
+		if !isCovered(resolvedWorkdir, mountedDirs) {
 			return nil, fmt.Errorf("workdir %q is not within any mounted directory", workdir)
 		}
 		workdir = resolvedWorkdir
@@ -756,7 +756,7 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 
 	// Bind-mount the program if not already covered by an existing mount.
 	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
-	if !isProgramCovered(resolvedProgram, mountedDirs) {
+	if !isCovered(resolvedProgram, mountedDirs) {
 		args = append(args, "--ro-bind", resolvedProgram, resolvedProgram)
 	}
 
@@ -784,10 +784,10 @@ func collectMountedDirs(mountCurrentDir bool, cwd string, mountReadonly, mountWr
 	return dirs
 }
 
-// isProgramCovered reports whether programDir is already covered by one of the mounted directories.
-func isProgramCovered(program string, mountedDirs []string) bool {
+// isCovered reports whether file is already covered by one of the mounted directories.
+func isCovered(file string, mountedDirs []string) bool {
 	for _, dir := range mountedDirs {
-		if isParentOrEqual(dir, program) {
+		if isParentOrEqual(dir, file) {
 			return true
 		}
 	}
@@ -795,7 +795,7 @@ func isProgramCovered(program string, mountedDirs []string) bool {
 }
 
 // isForbiddenMountTarget reports whether the resolved path is a sensitive directory
-// that must not be used as a --mount or --mount-writable target.
+// that must not be used as a --mount, --mount-writable or --tmpfs target.
 func isForbiddenMountTarget(resolved string) bool {
 	cleaned := filepath.Clean(resolved)
 	switch cleaned {
