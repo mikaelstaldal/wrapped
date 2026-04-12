@@ -685,7 +685,12 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		args = append(args, "--bind", resolved, resolved)
 	}
 
+	sandboxPaths := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
+	sandboxPaths = append(sandboxPaths, "/etc", "/tmp", "/proc", "/dev")
 	for _, symlink := range symlinks {
+		if err := validateSymlinkSrc(symlink.Src, sandboxPaths); err != nil {
+			return nil, fmt.Errorf("invalid --symlink %q -> %q: %w", symlink.Dest, symlink.Src, err)
+		}
 		args = append(args, "--symlink", symlink.Src, symlink.Dest)
 	}
 
@@ -771,6 +776,22 @@ func isForbiddenMountTarget(resolved string) bool {
 		return true
 	}
 	return false
+}
+
+// validateSymlinkSrc returns an error if src is an absolute path that does not fall
+// under any of the sandbox's mounted paths. Relative paths are always permitted since
+// they are resolved relative to the symlink's own location inside the sandbox.
+func validateSymlinkSrc(src string, sandboxPaths []string) error {
+	if !filepath.IsAbs(src) {
+		return nil
+	}
+	cleaned := filepath.Clean(src)
+	for _, p := range sandboxPaths {
+		if isParentOrEqual(p, cleaned) {
+			return nil
+		}
+	}
+	return fmt.Errorf("source %q is outside the sandbox's mounted paths", src)
 }
 
 // isParentOrEqual reports whether parent is a path prefix of (or equal to) child.
