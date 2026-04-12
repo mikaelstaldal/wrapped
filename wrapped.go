@@ -695,6 +695,9 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 	}
 
 	for _, path := range tmpfs {
+		if isForbiddenMountTarget(path) {
+			return nil, fmt.Errorf("tmpfs target %q is not allowed", path)
+		}
 		args = append(args, "--tmpfs", path)
 	}
 
