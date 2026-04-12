@@ -16,6 +16,16 @@ import (
 )
 
 var validApparmorProfile = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+var validPortRange = regexp.MustCompile(`^\d+(-\d+)?$`)
+
+func validatePortRanges(label string, ports []string) error {
+	for _, p := range ports {
+		if !validPortRange.MatchString(p) {
+			return fmt.Errorf("invalid %s port range %q: must be a port number or low-high range", label, p)
+		}
+	}
+	return nil
+}
 
 // ExitError indicates that the sandboxed program exited with a non-zero status.
 type ExitError struct {
@@ -481,6 +491,13 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 // namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
 // coordination protocol that causes ECHILD errors with --unshare-pid.
 func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) error {
+	if err := validatePortRanges("--expose-tcp", exposeTCP); err != nil {
+		return err
+	}
+	if err := validatePortRanges("--expose-udp", exposeUDP); err != nil {
+		return err
+	}
+
 	pastaPath, err := exec.LookPath("pasta")
 	if err != nil {
 		return fmt.Errorf("pasta is required: %w", err)
