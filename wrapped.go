@@ -622,6 +622,19 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		return nil, fmt.Errorf("failed to resolve current directory symlinks: %w", err)
 	}
 
+	if workdir != "" {
+		resolvedWorkdir, err := filepath.EvalSymlinks(workdir)
+		if err != nil {
+			return nil, fmt.Errorf("workdir %q not found: %w", workdir, err)
+		}
+		mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)
+		mountedDirs = append(mountedDirs, "/tmp")
+		if !isProgramCovered(resolvedWorkdir, mountedDirs) {
+			return nil, fmt.Errorf("workdir %q is not within any mounted directory", workdir)
+		}
+		workdir = resolvedWorkdir
+	}
+
 	if mountCurrentDir {
 		homeDir, ok := os.LookupEnv("HOME")
 		if !ok {
