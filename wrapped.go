@@ -10,9 +10,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 )
+
+var validApparmorProfile = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // ExitError indicates that the sandboxed program exited with a non-zero status.
 type ExitError struct {
@@ -75,6 +78,10 @@ type Symlink struct {
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
 	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string) error {
+	if apparmor != "" && !validApparmorProfile.MatchString(apparmor) {
+		return fmt.Errorf("invalid AppArmor profile name %q: must match ^[a-zA-Z0-9._-]+$", apparmor)
+	}
+
 	if networkSandboxOnly {
 		if allEnv {
 			return fmt.Errorf("--only-network cannot be combined with --all-env")
