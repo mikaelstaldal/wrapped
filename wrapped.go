@@ -622,7 +622,6 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(src)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: skipping /etc symlink %s: %v\n", src, err)
 				continue
 			}
 			args = append(args, "--symlink", target, src)
