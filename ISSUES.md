@@ -2,23 +2,6 @@
 
 ## Usability
 
-### High
-
-#### `--symlink` documentation describes argument order backwards
-
-The README (line 47) and CLI help text say "Create a symlink from SRC to DEST (specify as `--symlink DEST=SRC`)" — the prose is backwards. The left side is the symlink path (dest) and the right side is the target (src), so it should read "Create a symlink at DEST pointing to SRC".
-
-**Location:** `README.md:47`, `cmd/wrapped/main.go:110`  
-**Recommendation:** Fix the description to "Create a symlink at DEST pointing to SRC (repeatable, specify as `--symlink DEST=SRC`)".
-
----
-
-### Medium
-
----
-
-### Low
-
 #### PATH reset is undocumented
 
 When `--all-env` is not used, PATH is silently reset to `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. This is not mentioned in the README or help text, and surprises users with custom PATH values.
