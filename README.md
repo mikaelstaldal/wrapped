@@ -63,6 +63,11 @@ wrapped [flags] -- program [arguments...]
 | `bridge`   | Transparent network access via [pasta](https://passt.top/). The sandbox has its own network namespace and cannot reach localhost, but can reach the Internet.  |
 | `filtered` | Network access filtered by IP via nftables rules inside a pasta namespace. Hosts are resolved at startup. Use with `--allow-host`. Requires `pasta` and `nft`. |
 
+### File system
+
+The program to run (the file only, not the directory) is implicitly mounted read-only if not covered by any 
+`--mount`, `--mount-writable`, `--current-dir`, `--current-dir-writable` or automatic mount (`/usr`, `/etc`).
+
 ### Environment
 
 By default, PATH is reset to a standard value `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. 
@@ -109,11 +114,6 @@ Network-only sandbox with filtered network access:
 ```bash
 wrapped --only-network --allow-host example.com curl https://example.com
 ```
-
-### Note
-
-The program to run (the file only, not the directory) is implicitly mounted read-only if not covered by any 
-`--mount` or `--mount-writable` or automatic mount (`/usr`, `/etc`).
 
 ## License
 

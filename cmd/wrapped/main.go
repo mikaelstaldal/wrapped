@@ -115,7 +115,7 @@ func main() {
 	}
 
 	f := rootCmd.Flags()
-	f.StringVar(&networkMode, "network", "none", "Network mode: none, host, bridge, or filtered")
+	f.StringVar(&networkMode, "network", "none", "Network mode: none (isolated), host (unrestricted), bridge (sandboxed via pasta), filtered (bridge + nftables allowlist)")
 	f.StringArrayVar(&exposeTCP, "expose-tcp", nil, "Expose TCP port from sandbox to host (bridge mode only, can be repeated)")
 	f.StringArrayVar(&exposeUDP, "expose-udp", nil, "Expose UDP port from sandbox to host (bridge mode only, can be repeated)")
 	f.StringArrayVar(&allowedHosts, "allow-host", nil, "Allow network access to specific host (can be repeated, implies --network filtered)")
