@@ -36,23 +36,23 @@ wrapped [flags] -- program [arguments...]
 
 ### Flags
 
-| Flag                        | Description                                                                             |
-|-----------------------------|-----------------------------------------------------------------------------------------|
-| `--network <mode>`          | Network mode: `none` (default), `host`, `bridge`, or `filtered`                         |
-| `--expose-tcp <port>`       | Expose TCP port from sandbox to host (repeatable, bridge mode only)                     |
-| `--expose-udp <port>`       | Expose UDP port from sandbox to host (repeatable, bridge mode only)                     |
-| `--allow-host <host>`       | Allow network access to a specific host (repeatable, implies `--network filtered`)      |
-| `--current-dir`             | Mount the current directory read-only                                                   |
-| `--current-dir-writable`    | Mount the current directory writable                                                    |
-| `--mount <path>`            | Mount additional directory read-only (repeatable)                                       |
-| `--mount-writable <path>`   | Mount additional directory writable (repeatable)                                        |
-| `--symlink <dest>=<src>`    | Create a symlink at DEST pointing to SRC (repeatable, specify as `--symlink DEST=SRC`)  |
-| `--tmpfs <path>`            | Mount a tmpfs at the given path (repeatable)                                            |
-| `-w`, `--workdir <path>`    | Working directory inside the sandbox                                                    |
-| `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable)                                                  |
-| `--all-env`                 | Pass through all environment variables (use with caution, can expose sensitive secrets) |
-| `--apparmor <profile>`      | Run program with an AppArmor profile                                                    |
-| `--only-network`            | Only sandbox the network, leave filesystem untouched                                    |
+| Flag                        | Description                                                                            |
+|-----------------------------|----------------------------------------------------------------------------------------|
+| `--network <mode>`          | Network mode: `none` (default), `host`, `bridge`, or `filtered`                        |
+| `--expose-tcp <port>`       | Expose TCP port from sandbox to host (repeatable, bridge mode only)                    |
+| `--expose-udp <port>`       | Expose UDP port from sandbox to host (repeatable, bridge mode only)                    |
+| `--allow-host <host>`       | Allow network access to a specific host (repeatable, implies `--network filtered`)     |
+| `--current-dir`             | Mount the current directory read-only                                                  |
+| `--current-dir-writable`    | Mount the current directory writable                                                   |
+| `--mount <path>`            | Mount additional directory read-only (repeatable)                                      |
+| `--mount-writable <path>`   | Mount additional directory writable (repeatable)                                       |
+| `--symlink <dest>=<src>`    | Create a symlink at DEST pointing to SRC (repeatable, specify as `--symlink DEST=SRC`) |
+| `--tmpfs <path>`            | Mount a tmpfs at the given path (repeatable)                                           |
+| `-w`, `--workdir <path>`    | Working directory inside the sandbox                                                   |
+| `-e`, `--env <VAR[=value]>` | Pass environment variable (repeatable)                                                 |
+| `--all-env`                 | Pass through all environment variables (use with caution, can expose secrets)          |
+| `--apparmor <profile>`      | Run program with an AppArmor profile                                                   |
+| `--only-network`            | Only sandbox the network, leave filesystem untouched                                   |
 
 #### Network modes
 

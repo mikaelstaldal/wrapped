@@ -127,7 +127,7 @@ func main() {
 	f.StringArrayVar(&tmpfs, "tmpfs", nil, "Mount a tmpfs at the given path (can be repeated)")
 	f.StringVarP(&workdir, "workdir", "w", "", "Working directory")
 	f.StringArrayVarP(&envFlags, "env", "e", nil, "Pass environment variable")
-	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables (use with caution, can expose sensitive secrets)")
+	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables (use with caution, can expose secrets)")
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
 
