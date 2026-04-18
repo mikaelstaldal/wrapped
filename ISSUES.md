@@ -1,39 +1,5 @@
 # Issues
 
-## Security
-
-#### DNS fallback in filtered network mode allows all DNS traffic
-
-When DNS resolver IPs cannot be parsed from `/run/systemd/resolve/resolv.conf` or `/etc/resolv.conf`, the nftables rule falls back to allowing DNS queries to *any* destination on port 53. This defeats the purpose of `--network filtered`.
-
-**Location:** `wrapped.go` (buildNftRules)  
-**Recommendation:** Fail with an error if resolver IPs cannot be determined, rather than opening up all DNS.
-
-#### nftables rules built by string concatenation
-
-The filtered-mode nft script is assembled by concatenating strings including IP addresses. Although IPs are validated by `net.ParseIP`, the pattern is fragile and any future addition of unvalidated input could lead to command injection.
-
-**Location:** `wrapped.go` (buildNftRules)  
-**Recommendation:** Pass nft rules via stdin or construct them with separate arguments to avoid shell string concatenation.
-
----
-
-#### TOCTOU race on mount path resolution
-
-Mount paths are resolved with `filepath.EvalSymlinks` in the host process, but between that check and when bwrap actually mounts the path, a racing process could swap the path for a symlink to a forbidden location.
-
-**Location:** `wrapped.go` (buildBaseBwrapArgs)  
-**Recommendation:** Document this limitation; mitigating it fully requires OS-level support.
-
-#### `--all-env` leaks sensitive host environment variables
-
-When `--all-env` is used, all host environment variables (including `AWS_SECRET_ACCESS_KEY`, `GITHUB_TOKEN`, `KUBECONFIG`, etc.) are passed into the sandbox without filtering.
-
-**Location:** `wrapped.go` (buildBaseBwrapArgs)  
-**Recommendation:** Document the risk prominently. Optionally strip well-known secret variable names even in `--all-env` mode.
----
--
-
 ## Usability
 
 ### High
@@ -48,40 +14,6 @@ The README (line 47) and CLI help text say "Create a symlink from SRC to DEST (s
 ---
 
 ### Medium
-
-#### `--only-network` incompatibility checks happen too late
-
-Most `--only-network` flag conflicts are validated inside `Wrapped()` rather than in Cobra's `PreRunE`, and only two pairs are declared with `MarkFlagsMutuallyExclusive`. Users discover incompatibilities only after the command runs.
-
-**Location:** `wrapped.go:78–110`, `cmd/wrapped/main.go:121–122`  
-**Recommendation:** Move all `--only-network` incompatibility checks to `PreRunE`, or add more `MarkFlagsMutuallyExclusive` pairs.
-
-#### `--expose-tcp` / `--expose-udp` mode constraint validated at runtime
-
-These flags silently accepted with any `--network` mode; the error "--expose-tcp and --expose-udp can only be used with --network bridge" only fires at runtime.
-
-**Location:** `wrapped.go:115–116, 129–130, 137–139`  
-**Recommendation:** Validate in `PreRunE` that `--expose-tcp`/`--expose-udp` require `--network bridge`.
-
-#### `--allow-host` silently changes network mode
-
-When `--allow-host` is given without an explicit `--network`, the code silently changes the network mode to `filtered`. This can surprise users who expected `none` (the default).
-
-**Location:** `cmd/wrapped/main.go:62–68`  
-**Recommendation:** Either print a note ("Note: --allow-host implies --network filtered"), or require the user to explicitly pass `--network filtered` alongside `--allow-host`.
-
-#### No install hint when bwrap / pasta / nft is missing
-
-When a required binary is not in PATH, the error is technically accurate but not actionable. E.g.: `exec: "bwrap": executable file not found in $PATH`.
-
-**Location:** `wrapped.go:148, 216, 439, 448`  
-**Recommendation:** Append a brief install hint to each missing-binary error, e.g. "install bubblewrap via your package manager".
-
-#### No test coverage
-
-The repository has no `*_test.go` files. CLI flag combinations, error messages, and mount validation logic cannot be regression-tested.
-
-**Recommendation:** Add unit tests for flag validation, error message text, mount path resolution, and symlink parsing.
 
 ---
 
