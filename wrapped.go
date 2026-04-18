@@ -131,7 +131,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
+		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
 	argv := append([]string{"bwrap"}, bwrapArgs...)
@@ -143,7 +143,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
 	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool, tmpfs []string) error {
 	if _, err := exec.LookPath("nft"); err != nil {
-		return fmt.Errorf("nft (nftables) is required for filtered network access: %w", err)
+		return fmt.Errorf("nft (nftables) is required for filtered network access: %w; install nftables via your package manager", err)
 	}
 
 	ipv6 := hasIPv6Route()
@@ -202,7 +202,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
+		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
 	if apparmor != "" {
@@ -423,7 +423,7 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
+		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
 	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP)
@@ -432,7 +432,7 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string, exposeTCP, exposeUDP []string) error {
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
-		return fmt.Errorf("failed to find bwrap: %w", err)
+		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
 	args := []string{
@@ -470,7 +470,7 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) 
 
 	pastaPath, err := exec.LookPath("pasta")
 	if err != nil {
-		return fmt.Errorf("pasta is required: %w", err)
+		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
 	}
 
 	pastaArgs := []string{
