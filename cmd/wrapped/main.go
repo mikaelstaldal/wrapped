@@ -114,7 +114,7 @@ func main() {
 	f.StringArrayVar(&allowedHosts, "allow-host", nil, "Allow network access to specific host (can be repeated, implies --network filtered)")
 	f.StringArrayVar(&tmpfs, "tmpfs", nil, "Mount a tmpfs at the given path (can be repeated)")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
-	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables")
+	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables (use with caution, can expose sensitive secrets)")
 	f.StringArrayVar(&exposeTCP, "expose-tcp", nil, "Expose TCP port from sandbox to host (bridge mode only, can be repeated)")
 	f.StringArrayVar(&exposeUDP, "expose-udp", nil, "Expose UDP port from sandbox to host (bridge mode only, can be repeated)")
 
