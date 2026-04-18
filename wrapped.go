@@ -242,13 +242,16 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 	bwrapArgs = append(bwrapArgs, program)
 	bwrapArgs = append(bwrapArgs, arguments...)
 
-	// Build a shell command that runs nft rules first (inside pasta's namespace,
+	// Build a shell command that applies nft rules first (inside pasta's namespace,
 	// before bwrap), then execs bwrap. This ensures nft has CAP_NET_ADMIN from
-	// pasta's user namespace rather than bwrap's.
-	shellCmd := nftScript + " && exec " + shellQuote(bwrapPath)
+	// pasta's user namespace rather than bwrap's. The heredoc with a quoted
+	// delimiter passes the ruleset verbatim to nft's stdin — no shell expansion.
+	var execParts []string
+	execParts = append(execParts, "exec "+shellQuote(bwrapPath))
 	for _, arg := range bwrapArgs {
-		shellCmd += " " + shellQuote(arg)
+		execParts = append(execParts, shellQuote(arg))
 	}
+	shellCmd := "nft -f /dev/stdin <<'__NFT_RULES__'\n" + nftScript + "__NFT_RULES__\n" + strings.Join(execParts, " ")
 
 	return runPastaCommand("sh", []string{"-c", shellCmd}, nil, nil)
 }
@@ -320,8 +323,8 @@ func parseResolvConf(path string) ([]string, error) {
 	return ips, scanner.Err()
 }
 
-// buildNftRules returns a shell script that sets up nftables rules to allow only the given IPs.
-// resolverIPs are the DNS resolver addresses that DNS traffic (port 53) is restricted to.
+// buildNftRules returns an nftables script (suitable for `nft -f /dev/stdin`) that restricts
+// outbound traffic to the given IPs. resolverIPs are allowed only on port 53.
 func buildNftRules(allowedIPs []string, resolverIPs []string) string {
 	var ipv4, ipv6 []string
 	for _, addr := range allowedIPs {
@@ -346,26 +349,25 @@ func buildNftRules(allowedIPs []string, resolverIPs []string) string {
 		}
 	}
 
-	script := "nft add table inet filter && " +
-		"nft add chain inet filter output '{ type filter hook output priority 0; policy drop; }' && " +
-		"nft add rule inet filter output ct state established,related accept && " +
-		"nft add rule inet filter output oifname lo accept"
-
+	var b strings.Builder
+	b.WriteString("table inet filter {\n\tchain output {\n")
+	b.WriteString("\t\ttype filter hook output priority 0; policy drop;\n")
+	b.WriteString("\t\tct state established,related accept\n")
+	b.WriteString("\t\toifname lo accept\n")
 	if len(dnsIPv4) > 0 {
-		script += " && nft add rule inet filter output ip daddr '{ " + strings.Join(dnsIPv4, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
+		b.WriteString("\t\tip daddr { " + strings.Join(dnsIPv4, ", ") + " } meta l4proto { tcp, udp } th dport 53 accept\n")
 	}
 	if len(dnsIPv6) > 0 {
-		script += " && nft add rule inet filter output ip6 daddr '{ " + strings.Join(dnsIPv6, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
+		b.WriteString("\t\tip6 daddr { " + strings.Join(dnsIPv6, ", ") + " } meta l4proto { tcp, udp } th dport 53 accept\n")
 	}
-
 	if len(ipv4) > 0 {
-		script += " && nft add rule inet filter output ip daddr '{ " + strings.Join(ipv4, ", ") + " }' accept"
+		b.WriteString("\t\tip daddr { " + strings.Join(ipv4, ", ") + " } accept\n")
 	}
 	if len(ipv6) > 0 {
-		script += " && nft add rule inet filter output ip6 daddr '{ " + strings.Join(ipv6, ", ") + " }' accept"
+		b.WriteString("\t\tip6 daddr { " + strings.Join(ipv6, ", ") + " } accept\n")
 	}
-
-	return script
+	b.WriteString("\t}\n}\n")
+	return b.String()
 }
 
 // shellQuote returns s wrapped in single quotes, safe for use in a shell command.
