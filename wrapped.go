@@ -183,7 +183,10 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 		return err
 	}
 
-	resolverIPs := parseResolverIPs()
+	resolverIPs, err := parseResolverIPs()
+	if err != nil {
+		return fmt.Errorf("--network filtered: cannot determine DNS resolver IPs: %w", err)
+	}
 	nftScript := buildNftRules(allowedIPs, resolverIPs)
 
 	var bwrapArgs []string
@@ -279,15 +282,16 @@ func resolveHosts(hosts []string, ipv6 bool) ([]string, error) {
 
 // parseResolverIPs reads nameserver entries from /run/systemd/resolve/resolv.conf,
 // falling back to /etc/resolv.conf, and returns their IP addresses.
-func parseResolverIPs() []string {
+// Returns an error if no resolver IPs can be determined.
+func parseResolverIPs() ([]string, error) {
 	paths := []string{systemdResolve + "/resolv.conf", "/etc/resolv.conf"}
 	for _, path := range paths {
 		ips, err := parseResolvConf(path)
-		if err == nil {
-			return ips
+		if err == nil && len(ips) > 0 {
+			return ips, nil
 		}
 	}
-	return nil
+	return nil, fmt.Errorf("no nameserver entries found in %s", strings.Join(paths, " or "))
 }
 
 // parseResolvConf extracts nameserver IPs from a resolv.conf file.
@@ -347,16 +351,11 @@ func buildNftRules(allowedIPs []string, resolverIPs []string) string {
 		"nft add rule inet filter output ct state established,related accept && " +
 		"nft add rule inet filter output oifname lo accept"
 
-	if len(dnsIPv4) > 0 || len(dnsIPv6) > 0 {
-		if len(dnsIPv4) > 0 {
-			script += " && nft add rule inet filter output ip daddr '{ " + strings.Join(dnsIPv4, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
-		}
-		if len(dnsIPv6) > 0 {
-			script += " && nft add rule inet filter output ip6 daddr '{ " + strings.Join(dnsIPv6, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
-		}
-	} else {
-		// Fallback: allow DNS to any destination if no resolvers were found.
-		script += " && nft add rule inet filter output meta l4proto '{ tcp, udp }' th dport 53 accept"
+	if len(dnsIPv4) > 0 {
+		script += " && nft add rule inet filter output ip daddr '{ " + strings.Join(dnsIPv4, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
+	}
+	if len(dnsIPv6) > 0 {
+		script += " && nft add rule inet filter output ip6 daddr '{ " + strings.Join(dnsIPv6, ", ") + " }' meta l4proto '{ tcp, udp }' th dport 53 accept"
 	}
 
 	if len(ipv4) > 0 {
