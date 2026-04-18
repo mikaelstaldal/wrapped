@@ -63,6 +63,11 @@ wrapped [flags] -- program [arguments...]
 | `bridge`   | Transparent network access via [pasta](https://passt.top/). The sandbox has its own network namespace and cannot reach localhost, but can reach the Internet.  |
 | `filtered` | Network access filtered by IP via nftables rules inside a pasta namespace. Hosts are resolved at startup. Use with `--allow-host`. Requires `pasta` and `nft`. |
 
+### Environment
+
+By default, PATH is reset to a standard value `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. 
+Use `--all-env` or `--env PATH` to keep the host PATH, or `--env PATH=...` to set a custom one.
+
 ### Examples
 
 Run a program with no network and no access to the filesystem (beyond read-only access to system directories like `/usr` and `/etc`):

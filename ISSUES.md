@@ -2,13 +2,6 @@
 
 ## Usability
 
-#### PATH reset is undocumented
-
-When `--all-env` is not used, PATH is silently reset to `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. This is not mentioned in the README or help text, and surprises users with custom PATH values.
-
-**Location:** `wrapped.go:690`  
-**Recommendation:** Document in README: "By default, PATH is reset to a standard value. Use `--all-env` to keep the host PATH, or `-e PATH=...` to set a custom one."
-
 #### HOME directory error message lacks context
 
 "cannot run from home directory or its parent directories" does not explain why the restriction exists or suggest an alternative.

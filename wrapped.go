@@ -702,19 +702,29 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 				args = append(args, "--setenv", k, v)
 			}
 		}
-		args = append(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	}
 
+	hasPath := false
 	for _, e := range extraEnv {
 		if k, v, ok := strings.Cut(e, "="); ok {
+			if k == "PATH" {
+				hasPath = true
+			}
 			args = append(args, "--setenv", k, v)
 		} else {
+			if e == "PATH" {
+				hasPath = true
+			}
 			v, ok := os.LookupEnv(e)
 			if !ok {
 				return nil, fmt.Errorf("env var %s is not set", e)
 			}
 			args = append(args, "--setenv", e, v)
 		}
+	}
+
+	if !(allEnv || hasPath) {
+		args = append(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	}
 
 	args = append(args,
