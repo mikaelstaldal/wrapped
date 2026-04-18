@@ -76,6 +76,10 @@ func main() {
 				}
 			}
 
+			if (len(exposeTCP) > 0 || len(exposeUDP) > 0) && networkMode != wrapped.NetworkBridge {
+				return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
+			}
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
