@@ -67,6 +67,15 @@ func main() {
 				networkMode = wrapped.NetworkFiltered
 			}
 
+			if networkSandboxOnly {
+				if networkMode == wrapped.NetworkNone {
+					return fmt.Errorf("--only-network cannot be combined with --network none")
+				}
+				if networkMode == wrapped.NetworkHost {
+					return fmt.Errorf("--only-network cannot be combined with --network host")
+				}
+			}
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -120,6 +129,14 @@ func main() {
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "all-env")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "current-dir")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "current-dir-writable")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "mount")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "mount-writable")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "symlink")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "workdir")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "env")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "tmpfs")
 
 	if err := rootCmd.Execute(); err != nil {
 		var exitErr *wrapped.ExitError

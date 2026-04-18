@@ -93,38 +93,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	}
 
 	if networkSandboxOnly {
-		if allEnv {
-			return fmt.Errorf("--only-network cannot be combined with --all-env")
-		}
-		if mountCurrentDir || mountCurrentDirWritable {
-			return fmt.Errorf("--only-network cannot be combined with --current-dir or --current-dir-writable")
-		}
-		if len(mountReadonly) > 0 {
-			return fmt.Errorf("--only-network cannot be combined with --mount")
-		}
-		if len(mountWritable) > 0 {
-			return fmt.Errorf("--only-network cannot be combined with --mount-writable")
-		}
-		if len(symlinks) > 0 {
-			return fmt.Errorf("--only-network cannot be combined with --symlink")
-		}
-		if workdir != "" {
-			return fmt.Errorf("--only-network cannot be combined with --workdir")
-		}
-		if len(extraEnv) > 0 {
-			return fmt.Errorf("--only-network cannot be combined with --env")
-		}
-		if len(tmpfs) > 0 {
-			return fmt.Errorf("--only-network cannot be combined with --tmpfs")
-		}
-
 		switch networkMode {
-		case NetworkNone:
-			return fmt.Errorf("--only-network cannot be combined with --network none")
-
-		case NetworkHost:
-			return fmt.Errorf("--only-network cannot be combined with --network host")
-
 		case NetworkBridge:
 			return wrappedPastaNetworkOnly(program, arguments, apparmor, exposeTCP, exposeUDP)
 
