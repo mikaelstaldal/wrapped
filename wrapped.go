@@ -457,20 +457,14 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP)
 }
 
-// runPastaCommand runs pasta in command mode, where pasta creates the user+network
-// namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
-// coordination protocol that causes ECHILD errors with --unshare-pid.
-func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) error {
+// buildPastaArgs constructs the pasta command-line arguments for command mode.
+// The returned slice starts with pasta flags and ends with "--", name, args...
+func buildPastaArgs(name string, args []string, exposeTCP, exposeUDP []string) ([]string, error) {
 	if err := validatePortRanges("--expose-tcp", exposeTCP); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validatePortRanges("--expose-udp", exposeUDP); err != nil {
-		return err
-	}
-
-	pastaPath, err := exec.LookPath("pasta")
-	if err != nil {
-		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
+		return nil, err
 	}
 
 	pastaArgs := []string{
@@ -496,6 +490,22 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) 
 	pastaArgs = append(pastaArgs, "--")
 	pastaArgs = append(pastaArgs, name)
 	pastaArgs = append(pastaArgs, args...)
+	return pastaArgs, nil
+}
+
+// runPastaCommand runs pasta in command mode, where pasta creates the user+network
+// namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
+// coordination protocol that causes ECHILD errors with --unshare-pid.
+func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) error {
+	pastaArgs, err := buildPastaArgs(name, args, exposeTCP, exposeUDP)
+	if err != nil {
+		return err
+	}
+
+	pastaPath, err := exec.LookPath("pasta")
+	if err != nil {
+		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
+	}
 
 	cmd := exec.Command(pastaPath, pastaArgs...)
 	cmd.Stdin = os.Stdin
