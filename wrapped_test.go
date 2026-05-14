@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // containsSeq reports whether args contains the given consecutive subsequence.
@@ -39,9 +41,7 @@ func TestApparmorProfileValidation(t *testing.T) {
 		"AppArmor.Profile-123",
 	}
 	for _, name := range valid {
-		if !validApparmorProfile.MatchString(name) {
-			t.Errorf("expected %q to be valid", name)
-		}
+		assert.Regexp(t, validApparmorProfile, name, "expected %q to be valid", name)
 	}
 
 	invalid := []string{
@@ -56,23 +56,19 @@ func TestApparmorProfileValidation(t *testing.T) {
 		"foo/bar",      // slash
 	}
 	for _, name := range invalid {
-		if name != "" && validApparmorProfile.MatchString(name) {
-			t.Errorf("expected %q to be invalid", name)
+		if name != "" {
+			assert.NotRegexp(t, validApparmorProfile, name, "expected %q to be invalid", name)
 		}
 	}
 }
 
 func TestValidatePortRanges(t *testing.T) {
 	valid := []string{"80", "443", "1024-65535", "0", "8080-8090"}
-	if err := validatePortRanges("--expose-tcp", valid); err != nil {
-		t.Errorf("unexpected error for valid ports: %v", err)
-	}
+	assert.NoError(t, validatePortRanges("--expose-tcp", valid), "unexpected error for valid ports")
 
 	invalid := []string{"abc", "80-", "-443", "80:443", "80/tcp"}
 	for _, p := range invalid {
-		if err := validatePortRanges("--expose-tcp", []string{p}); err == nil {
-			t.Errorf("expected error for port %q, got nil", p)
-		}
+		assert.Error(t, validatePortRanges("--expose-tcp", []string{p}), "expected error for port %q", p)
 	}
 }
 
@@ -90,9 +86,7 @@ func TestIsParentOrEqual(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := isParentOrEqual(c.parent, c.child)
-		if got != c.want {
-			t.Errorf("isParentOrEqual(%q, %q) = %v, want %v", c.parent, c.child, got, c.want)
-		}
+		assert.Equal(t, c.want, got, "isParentOrEqual(%q, %q)", c.parent, c.child)
 	}
 }
 
@@ -110,25 +104,19 @@ func TestIsCovered(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := isCovered(c.file, dirs)
-		if got != c.want {
-			t.Errorf("isCovered(%q) = %v, want %v", c.file, got, c.want)
-		}
+		assert.Equal(t, c.want, got, "isCovered(%q)", c.file)
 	}
 }
 
 func TestIsForbiddenMountTarget(t *testing.T) {
 	forbidden := []string{"/", "/proc", "/dev", "/sys"}
 	for _, p := range forbidden {
-		if !isForbiddenMountTarget(p) {
-			t.Errorf("expected %q to be forbidden", p)
-		}
+		assert.True(t, isForbiddenMountTarget(p), "expected %q to be forbidden", p)
 	}
 
 	allowed := []string{"/home/user", "/tmp/mydir", "/opt/data"}
 	for _, p := range allowed {
-		if isForbiddenMountTarget(p) {
-			t.Errorf("expected %q to be allowed", p)
-		}
+		assert.False(t, isForbiddenMountTarget(p), "expected %q to be allowed", p)
 	}
 }
 
@@ -136,25 +124,15 @@ func TestValidateSymlinkSrc(t *testing.T) {
 	sandbox := []string{"/usr", "/tmp", "/home/user/project"}
 
 	// Relative paths always OK.
-	if err := validateSymlinkSrc("../lib", sandbox); err != nil {
-		t.Errorf("unexpected error for relative path: %v", err)
-	}
+	assert.NoError(t, validateSymlinkSrc("../lib", sandbox), "unexpected error for relative path")
 
 	// Absolute paths inside sandbox OK.
-	if err := validateSymlinkSrc("/usr/lib", sandbox); err != nil {
-		t.Errorf("unexpected error for /usr/lib: %v", err)
-	}
-	if err := validateSymlinkSrc("/home/user/project/file", sandbox); err != nil {
-		t.Errorf("unexpected error for project path: %v", err)
-	}
+	assert.NoError(t, validateSymlinkSrc("/usr/lib", sandbox), "unexpected error for /usr/lib")
+	assert.NoError(t, validateSymlinkSrc("/home/user/project/file", sandbox), "unexpected error for project path")
 
 	// Absolute paths outside sandbox rejected.
-	if err := validateSymlinkSrc("/etc/passwd", sandbox); err == nil {
-		t.Error("expected error for /etc/passwd outside sandbox")
-	}
-	if err := validateSymlinkSrc("/root/secret", sandbox); err == nil {
-		t.Error("expected error for /root/secret outside sandbox")
-	}
+	assert.Error(t, validateSymlinkSrc("/etc/passwd", sandbox), "expected error for /etc/passwd outside sandbox")
+	assert.Error(t, validateSymlinkSrc("/root/secret", sandbox), "expected error for /root/secret outside sandbox")
 }
 
 func TestShellQuote(t *testing.T) {
@@ -168,35 +146,24 @@ func TestShellQuote(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := shellQuote(c.in)
-		if got != c.want {
-			t.Errorf("shellQuote(%q) = %q, want %q", c.in, got, c.want)
-		}
+		assert.Equal(t, c.want, got, "shellQuote(%q)", c.in)
 	}
 }
 
 func TestParseResolvConf(t *testing.T) {
 	content := "# comment\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch example.com\nnameserver not-an-ip\n"
 	f, err := os.CreateTemp(t.TempDir(), "resolv.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+	_, err = f.WriteString(content)
+	require.NoError(t, err)
 	f.Close()
 
 	ips, err := parseResolvConf(f.Name())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(ips) != 2 || ips[0] != "1.1.1.1" || ips[1] != "8.8.8.8" {
-		t.Errorf("got IPs %v, want [1.1.1.1 8.8.8.8]", ips)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"1.1.1.1", "8.8.8.8"}, ips)
 
 	_, err = parseResolvConf(filepath.Join(t.TempDir(), "nonexistent"))
-	if err == nil {
-		t.Error("expected error for missing file")
-	}
+	assert.Error(t, err, "expected error for missing file")
 }
 
 func TestBuildNftRules(t *testing.T) {
@@ -214,20 +181,14 @@ func TestBuildNftRules(t *testing.T) {
 		"ip6 daddr { 2001:4860:4860::8888 } meta l4proto { tcp, udp } th dport 53 accept",
 	}
 	for _, s := range mustContain {
-		if !strings.Contains(rules, s) {
-			t.Errorf("nft rules missing %q\nfull rules:\n%s", s, rules)
-		}
+		assert.Contains(t, rules, s, "nft rules missing %q", s)
 	}
 }
 
 func TestBuildNftRulesEmpty(t *testing.T) {
 	rules := buildNftRules(nil, nil)
-	if !strings.Contains(rules, "policy drop") {
-		t.Error("rules should still have drop policy when no IPs given")
-	}
-	if strings.Contains(rules, "ip daddr") {
-		t.Error("rules should have no ip daddr rules when no IPs given")
-	}
+	assert.Contains(t, rules, "policy drop", "rules should still have drop policy when no IPs given")
+	assert.NotContains(t, rules, "ip daddr", "rules should have no ip daddr rules when no IPs given")
 }
 
 func TestWrappedExposeTCPUDPRequiresBridge(t *testing.T) {
@@ -244,13 +205,7 @@ func TestWrappedExposeTCPUDPRequiresBridge(t *testing.T) {
 	}
 	for _, c := range cases {
 		err := Wrapped("true", nil, c.network, false, false, nil, nil, nil, nil, "", "", nil, false, false, nil, c.tcp, c.udp)
-		if err == nil {
-			t.Errorf("expected error for network=%q tcp=%v udp=%v", c.network, c.tcp, c.udp)
-			continue
-		}
-		if !strings.Contains(err.Error(), "--expose-tcp and --expose-udp can only be used with --network bridge") {
-			t.Errorf("unexpected error for network=%q: %v", c.network, err)
-		}
+		assert.ErrorContains(t, err, "--expose-tcp and --expose-udp can only be used with --network bridge", "expected error for network=%q tcp=%v udp=%v", c.network, c.tcp, c.udp)
 	}
 }
 
@@ -263,13 +218,7 @@ func TestWrappedRejectsInvalidApparmorProfile(t *testing.T) {
 	}
 	for _, name := range bad {
 		err := Wrapped("true", nil, NetworkNone, false, false, nil, nil, nil, nil, "", name, nil, false, false, nil, nil, nil)
-		if err == nil {
-			t.Errorf("expected error for profile %q, got nil", name)
-			continue
-		}
-		if !strings.Contains(err.Error(), "invalid AppArmor profile name") {
-			t.Errorf("unexpected error for profile %q: %v", name, err)
-		}
+		assert.ErrorContains(t, err, "invalid AppArmor profile name", "expected error for profile %q", name)
 	}
 }
 
@@ -283,9 +232,7 @@ func testProgram(t *testing.T) string {
 func TestBuildBaseBwrapArgsStructure(t *testing.T) {
 	prog := testProgram(t)
 	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
 	mustHaveSeq := [][]string{
 		{"--ro-bind", "/usr", "/usr"},
@@ -298,15 +245,11 @@ func TestBuildBaseBwrapArgsStructure(t *testing.T) {
 		{"--dev", "/dev"},
 	}
 	for _, seq := range mustHaveSeq {
-		if !containsSeq(args, seq...) {
-			t.Errorf("args missing sequence %v\nfull args: %v", seq, args)
-		}
+		assert.True(t, containsSeq(args, seq...), "args missing sequence %v", seq)
 	}
 
 	for _, flag := range []string{"--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-cgroup-try"} {
-		if !containsArg(args, flag) {
-			t.Errorf("args missing %q\nfull args: %v", flag, args)
-		}
+		assert.Contains(t, args, flag)
 	}
 }
 
@@ -315,27 +258,15 @@ func TestBuildBaseBwrapArgsClearEnv(t *testing.T) {
 
 	// Without allEnv: --clearenv and default PATH should be present.
 	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsArg(args, "--clearenv") {
-		t.Errorf("expected --clearenv without allEnv\nfull args: %v", args)
-	}
-	if !containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin") {
-		t.Errorf("expected default PATH setenv\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, args, "--clearenv")
+	assert.True(t, containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
 
 	// With allEnv: --clearenv must not appear, nor should default PATH be set.
 	args, err = buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", true, prog, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if containsArg(args, "--clearenv") {
-		t.Errorf("did not expect --clearenv with allEnv=true\nfull args: %v", args)
-	}
-	if containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin") {
-		t.Errorf("did not expect default PATH with allEnv=true\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.NotContains(t, args, "--clearenv")
+	assert.False(t, containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
 }
 
 func TestBuildBaseBwrapArgsExtraEnv(t *testing.T) {
@@ -343,27 +274,15 @@ func TestBuildBaseBwrapArgsExtraEnv(t *testing.T) {
 
 	// Extra env with KEY=VALUE form.
 	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, []string{"FOO=bar", "BAZ=qux"}, "", false, prog, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsSeq(args, "--setenv", "FOO", "bar") {
-		t.Errorf("expected --setenv FOO bar\nfull args: %v", args)
-	}
-	if !containsSeq(args, "--setenv", "BAZ", "qux") {
-		t.Errorf("expected --setenv BAZ qux\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.True(t, containsSeq(args, "--setenv", "FOO", "bar"))
+	assert.True(t, containsSeq(args, "--setenv", "BAZ", "qux"))
 
 	// Providing PATH in extraEnv suppresses the default PATH.
 	args, err = buildBaseBwrapArgs(false, false, nil, nil, nil, []string{"PATH=/custom/bin"}, "", false, prog, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsSeq(args, "--setenv", "PATH", "/custom/bin") {
-		t.Errorf("expected --setenv PATH /custom/bin\nfull args: %v", args)
-	}
-	if containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin") {
-		t.Errorf("did not expect default PATH when PATH already set\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.True(t, containsSeq(args, "--setenv", "PATH", "/custom/bin"))
+	assert.False(t, containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
 }
 
 func TestBuildBaseBwrapArgsMountCurrentDir(t *testing.T) {
@@ -373,159 +292,93 @@ func TestBuildBaseBwrapArgsMountCurrentDir(t *testing.T) {
 
 	// Read-only mount.
 	args, err := buildBaseBwrapArgs(true, false, nil, nil, nil, nil, "", false, prog, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsSeq(args, "--ro-bind", cwd, cwd) {
-		t.Errorf("expected --ro-bind for current dir\nfull args: %v", args)
-	}
-	if containsSeq(args, "--bind", cwd, cwd) {
-		t.Errorf("did not expect --bind for read-only mount\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.True(t, containsSeq(args, "--ro-bind", cwd, cwd))
+	assert.False(t, containsSeq(args, "--bind", cwd, cwd))
 
 	// Writable mount.
 	args, err = buildBaseBwrapArgs(true, true, nil, nil, nil, nil, "", false, prog, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsSeq(args, "--bind", cwd, cwd) {
-		t.Errorf("expected --bind for writable current dir\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.True(t, containsSeq(args, "--bind", cwd, cwd))
 }
 
 func TestBuildBaseBwrapArgsTmpfs(t *testing.T) {
 	prog := testProgram(t)
 	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, []string{"/run/cache"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsSeq(args, "--tmpfs", "/run/cache") {
-		t.Errorf("expected --tmpfs /run/cache\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.True(t, containsSeq(args, "--tmpfs", "/run/cache"))
 }
 
 func TestBuildBwrapArgsNoNetwork(t *testing.T) {
 	prog := testProgram(t)
 	args, err := buildBwrapArgs(prog, nil, false, false, false, nil, nil, nil, nil, "", "", false, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsArg(args, "--unshare-net") {
-		t.Errorf("expected --unshare-net for no-network mode\nfull args: %v", args)
-	}
-	if !containsArg(args, "--unshare-uts") {
-		t.Errorf("expected --unshare-uts for no-network mode\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, args, "--unshare-net")
+	assert.Contains(t, args, "--unshare-uts")
 }
 
 func TestBuildBwrapArgsHostNetwork(t *testing.T) {
 	prog := testProgram(t)
 	args, err := buildBwrapArgs(prog, nil, true, false, false, nil, nil, nil, nil, "", "", false, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if containsArg(args, "--unshare-net") {
-		t.Errorf("did not expect --unshare-net for host network\nfull args: %v", args)
-	}
-	if containsArg(args, "--unshare-uts") {
-		t.Errorf("did not expect --unshare-uts for host network\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.NotContains(t, args, "--unshare-net")
+	assert.NotContains(t, args, "--unshare-uts")
 }
 
 func TestBuildBwrapArgsAppArmor(t *testing.T) {
 	prog := testProgram(t)
 	resolvedProg, err := resolveProgram(prog)
-	if err != nil {
-		t.Fatalf("resolveProgram: %v", err)
-	}
+	require.NoError(t, err)
 
 	args, err := buildBwrapArgs(prog, []string{"arg1"}, false, false, false, nil, nil, nil, nil, "", "my-profile", false, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
 	// aa-exec -p profile -- must appear immediately before the program.
-	if !containsSeq(args, "aa-exec", "-p", "my-profile", "--", resolvedProg, "arg1") {
-		t.Errorf("expected aa-exec sequence before program\nfull args: %v", args)
-	}
+	assert.True(t, containsSeq(args, "aa-exec", "-p", "my-profile", "--", resolvedProg, "arg1"))
 }
 
 func TestBuildBwrapArgsProgramAndArguments(t *testing.T) {
 	prog := testProgram(t)
 	resolvedProg, err := resolveProgram(prog)
-	if err != nil {
-		t.Fatalf("resolveProgram: %v", err)
-	}
+	require.NoError(t, err)
 
 	args, err := buildBwrapArgs(prog, []string{"--foo", "bar"}, false, false, false, nil, nil, nil, nil, "", "", false, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
-	if !containsSeq(args, resolvedProg, "--foo", "bar") {
-		t.Errorf("expected program and arguments at end\nfull args: %v", args)
-	}
+	assert.True(t, containsSeq(args, resolvedProg, "--foo", "bar"))
 }
 
 func TestBuildPastaArgsNoPorts(t *testing.T) {
 	args, err := buildPastaArgs("/usr/bin/bwrap", []string{"--unshare-user"}, nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsArg(args, "--config-net") {
-		t.Errorf("expected --config-net\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, args, "--config-net")
 	// Host-to-namespace forwarding must be disabled.
-	if !containsSeq(args, "-T", "none") {
-		t.Errorf("expected -T none\nfull args: %v", args)
-	}
-	if !containsSeq(args, "-U", "none") {
-		t.Errorf("expected -U none\nfull args: %v", args)
-	}
+	assert.True(t, containsSeq(args, "-T", "none"))
+	assert.True(t, containsSeq(args, "-U", "none"))
 	// No exposed ports → -t none and -u none.
-	if !containsSeq(args, "-t", "none") {
-		t.Errorf("expected -t none when no TCP ports exposed\nfull args: %v", args)
-	}
-	if !containsSeq(args, "-u", "none") {
-		t.Errorf("expected -u none when no UDP ports exposed\nfull args: %v", args)
-	}
+	assert.True(t, containsSeq(args, "-t", "none"))
+	assert.True(t, containsSeq(args, "-u", "none"))
 	// Command separator and wrapped command must follow pasta flags.
-	if !containsSeq(args, "--", "/usr/bin/bwrap", "--unshare-user") {
-		t.Errorf("expected -- bwrap args at end\nfull args: %v", args)
-	}
+	assert.True(t, containsSeq(args, "--", "/usr/bin/bwrap", "--unshare-user"))
 }
 
 func TestBuildPastaArgsWithPorts(t *testing.T) {
 	args, err := buildPastaArgs("/usr/bin/bwrap", nil, []string{"80", "443"}, []string{"53"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsSeq(args, "-t", "80,443") {
-		t.Errorf("expected -t 80,443\nfull args: %v", args)
-	}
-	if !containsSeq(args, "-u", "53") {
-		t.Errorf("expected -u 53\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.True(t, containsSeq(args, "-t", "80,443"))
+	assert.True(t, containsSeq(args, "-u", "53"))
 }
 
 func TestBuildPastaArgsPortRange(t *testing.T) {
 	args, err := buildPastaArgs("/usr/bin/bwrap", nil, []string{"8080-8090"}, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !containsSeq(args, "-t", "8080-8090") {
-		t.Errorf("expected -t 8080-8090\nfull args: %v", args)
-	}
+	require.NoError(t, err)
+	assert.True(t, containsSeq(args, "-t", "8080-8090"))
 }
 
 func TestBuildPastaArgsInvalidPorts(t *testing.T) {
 	_, err := buildPastaArgs("/usr/bin/bwrap", nil, []string{"not-a-port"}, nil)
-	if err == nil {
-		t.Error("expected error for invalid TCP port")
-	}
+	assert.Error(t, err, "expected error for invalid TCP port")
 
 	_, err = buildPastaArgs("/usr/bin/bwrap", nil, nil, []string{"80:443"})
-	if err == nil {
-		t.Error("expected error for invalid UDP port")
-	}
+	assert.Error(t, err, "expected error for invalid UDP port")
 }

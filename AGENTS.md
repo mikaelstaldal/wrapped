@@ -41,3 +41,7 @@ Key design: the tool constructs a `bwrap` command line with namespace isolation 
 ### Documentation
 
 Keep the documentation in `README.md` up-to-date with command line options etc.
+
+### Testing
+
+Use [testify](https://github.com/stretchr/testify) (`assert` and `require` packages) for all Go tests.
