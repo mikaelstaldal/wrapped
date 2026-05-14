@@ -733,7 +733,7 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		}
 	}
 
-	if !(allEnv || hasPath) {
+	if !allEnv && !hasPath {
 		args = append(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	}
 

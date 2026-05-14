@@ -3,7 +3,6 @@ package wrapped
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,11 +24,6 @@ func containsSeq(args []string, seq ...string) bool {
 		}
 	}
 	return false
-}
-
-// containsArg reports whether args contains the given single element.
-func containsArg(args []string, arg string) bool {
-	return slices.Contains(args, arg)
 }
 
 func TestApparmorProfileValidation(t *testing.T) {
