@@ -14,6 +14,6 @@ while getopts "o:" opt; do
   esac
 done
 
-go build -tags netgo -ldflags "-X main.version=0.1.0 -X \"main.commit=$(git rev-parse --short HEAD) $(git log -1 --format=%ci)\"" $OUTPUT_FLAG ./cmd/wrapped
+go build -trimpath -buildvcs=true -tags netgo -ldflags "-X main.version=0.1.0" $OUTPUT_FLAG ./cmd/wrapped
 go test ./...
 golangci-lint run ./...

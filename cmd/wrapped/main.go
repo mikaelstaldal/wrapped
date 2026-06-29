@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"strings"
+	"time"
 	"wrapped"
 
 	"github.com/spf13/cobra"
 )
 
 // Set via -ldflags at build time.
-var version, commit string
+var version string
 
 func main() {
 	var (
@@ -37,8 +39,32 @@ func main() {
 	versionStr := "dev"
 	if version != "" {
 		versionStr = version
-		if commit != "" {
-			versionStr += " (" + commit + ")"
+
+		info, ok := debug.ReadBuildInfo()
+		if ok {
+			settings := make(map[string]string, len(info.Settings))
+			for _, s := range info.Settings {
+				settings[s.Key] = s.Value
+			}
+			versionStr += " ("
+			if vcs, ok := settings["vcs"]; ok {
+				versionStr += vcs + " "
+			}
+			if rev, ok := settings["vcs.revision"]; ok {
+				versionStr += "revision " + rev
+			}
+			modified := settings["vcs.modified"] == "true"
+			if modified {
+				versionStr += " (dirty)"
+			}
+			if t, ok := settings["vcs.time"]; ok {
+				if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
+					versionStr += " " + parsedTime.Local().Format("2006-01-02 15:04:05")
+				} else {
+					versionStr += " " + t
+				}
+			}
+			versionStr += ")"
 		}
 	}
 
@@ -143,8 +169,7 @@ func main() {
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "tmpfs")
 
 	if err := rootCmd.Execute(); err != nil {
-		var exitErr *wrapped.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*wrapped.ExitError](err); ok {
 			os.Exit(exitErr.Code)
 		}
 		log.Fatal(err)
