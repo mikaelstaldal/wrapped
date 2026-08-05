@@ -198,7 +198,7 @@ func TestWrappedExposeTCPUDPRequiresBridge(t *testing.T) {
 		{NetworkFiltered, nil, []string{"123"}},
 	}
 	for _, c := range cases {
-		err := Wrapped("true", nil, c.network, false, false, nil, nil, nil, nil, "", "", nil, false, false, nil, c.tcp, c.udp)
+		err := Wrapped("true", nil, c.network, false, false, nil, nil, nil, nil, "", "", nil, false, false, nil, c.tcp, c.udp, false)
 		assert.ErrorContains(t, err, "--expose-tcp and --expose-udp can only be used with --network bridge", "expected error for network=%q tcp=%v udp=%v", c.network, c.tcp, c.udp)
 	}
 }
@@ -211,7 +211,7 @@ func TestWrappedRejectsInvalidApparmorProfile(t *testing.T) {
 		"foo|bar",
 	}
 	for _, name := range bad {
-		err := Wrapped("true", nil, NetworkNone, false, false, nil, nil, nil, nil, "", name, nil, false, false, nil, nil, nil)
+		err := Wrapped("true", nil, NetworkNone, false, false, nil, nil, nil, nil, "", name, nil, false, false, nil, nil, nil, false)
 		assert.ErrorContains(t, err, "invalid AppArmor profile name", "expected error for profile %q", name)
 	}
 }
@@ -225,7 +225,7 @@ func testProgram(t *testing.T) string {
 
 func TestBuildBaseBwrapArgsStructure(t *testing.T) {
 	prog := testProgram(t)
-	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, nil)
+	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, nil, false)
 	require.NoError(t, err)
 
 	mustHaveSeq := [][]string{
@@ -242,22 +242,34 @@ func TestBuildBaseBwrapArgsStructure(t *testing.T) {
 		assert.True(t, containsSeq(args, seq...), "args missing sequence %v", seq)
 	}
 
-	for _, flag := range []string{"--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-cgroup-try"} {
+	for _, flag := range []string{"--unshare-user", "--unshare-ipc", "--unshare-pid"} {
 		assert.Contains(t, args, flag)
 	}
+
+	// The cgroup namespace is not unshared by default.
+	assert.NotContains(t, args, "--unshare-cgroup")
+	assert.NotContains(t, args, "--unshare-cgroup-try")
+}
+
+func TestBuildBaseBwrapArgsUnshareCgroup(t *testing.T) {
+	prog := testProgram(t)
+
+	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, nil, true)
+	require.NoError(t, err)
+	assert.Contains(t, args, "--unshare-cgroup")
 }
 
 func TestBuildBaseBwrapArgsClearEnv(t *testing.T) {
 	prog := testProgram(t)
 
 	// Without allEnv: --clearenv and default PATH should be present.
-	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, nil)
+	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, nil, false)
 	require.NoError(t, err)
 	assert.Contains(t, args, "--clearenv")
 	assert.True(t, containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
 
 	// With allEnv: --clearenv must not appear, nor should default PATH be set.
-	args, err = buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", true, prog, nil)
+	args, err = buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", true, prog, nil, false)
 	require.NoError(t, err)
 	assert.NotContains(t, args, "--clearenv")
 	assert.False(t, containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
@@ -267,13 +279,13 @@ func TestBuildBaseBwrapArgsExtraEnv(t *testing.T) {
 	prog := testProgram(t)
 
 	// Extra env with KEY=VALUE form.
-	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, []string{"FOO=bar", "BAZ=qux"}, "", false, prog, nil)
+	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, []string{"FOO=bar", "BAZ=qux"}, "", false, prog, nil, false)
 	require.NoError(t, err)
 	assert.True(t, containsSeq(args, "--setenv", "FOO", "bar"))
 	assert.True(t, containsSeq(args, "--setenv", "BAZ", "qux"))
 
 	// Providing PATH in extraEnv suppresses the default PATH.
-	args, err = buildBaseBwrapArgs(false, false, nil, nil, nil, []string{"PATH=/custom/bin"}, "", false, prog, nil)
+	args, err = buildBaseBwrapArgs(false, false, nil, nil, nil, []string{"PATH=/custom/bin"}, "", false, prog, nil, false)
 	require.NoError(t, err)
 	assert.True(t, containsSeq(args, "--setenv", "PATH", "/custom/bin"))
 	assert.False(t, containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
@@ -285,27 +297,27 @@ func TestBuildBaseBwrapArgsMountCurrentDir(t *testing.T) {
 	cwd, _ = filepath.EvalSymlinks(cwd)
 
 	// Read-only mount.
-	args, err := buildBaseBwrapArgs(true, false, nil, nil, nil, nil, "", false, prog, nil)
+	args, err := buildBaseBwrapArgs(true, false, nil, nil, nil, nil, "", false, prog, nil, false)
 	require.NoError(t, err)
 	assert.True(t, containsSeq(args, "--ro-bind", cwd, cwd))
 	assert.False(t, containsSeq(args, "--bind", cwd, cwd))
 
 	// Writable mount.
-	args, err = buildBaseBwrapArgs(true, true, nil, nil, nil, nil, "", false, prog, nil)
+	args, err = buildBaseBwrapArgs(true, true, nil, nil, nil, nil, "", false, prog, nil, false)
 	require.NoError(t, err)
 	assert.True(t, containsSeq(args, "--bind", cwd, cwd))
 }
 
 func TestBuildBaseBwrapArgsTmpfs(t *testing.T) {
 	prog := testProgram(t)
-	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, []string{"/run/cache"})
+	args, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, prog, []string{"/run/cache"}, false)
 	require.NoError(t, err)
 	assert.True(t, containsSeq(args, "--tmpfs", "/run/cache"))
 }
 
 func TestBuildBwrapArgsNoNetwork(t *testing.T) {
 	prog := testProgram(t)
-	args, err := buildBwrapArgs(prog, nil, false, false, false, nil, nil, nil, nil, "", "", false, nil)
+	args, err := buildBwrapArgs(prog, nil, false, false, false, nil, nil, nil, nil, "", "", false, nil, false)
 	require.NoError(t, err)
 	assert.Contains(t, args, "--unshare-net")
 	assert.Contains(t, args, "--unshare-uts")
@@ -313,7 +325,7 @@ func TestBuildBwrapArgsNoNetwork(t *testing.T) {
 
 func TestBuildBwrapArgsHostNetwork(t *testing.T) {
 	prog := testProgram(t)
-	args, err := buildBwrapArgs(prog, nil, true, false, false, nil, nil, nil, nil, "", "", false, nil)
+	args, err := buildBwrapArgs(prog, nil, true, false, false, nil, nil, nil, nil, "", "", false, nil, false)
 	require.NoError(t, err)
 	assert.NotContains(t, args, "--unshare-net")
 	assert.NotContains(t, args, "--unshare-uts")
@@ -324,7 +336,7 @@ func TestBuildBwrapArgsAppArmor(t *testing.T) {
 	resolvedProg, err := resolveProgram(prog)
 	require.NoError(t, err)
 
-	args, err := buildBwrapArgs(prog, []string{"arg1"}, false, false, false, nil, nil, nil, nil, "", "my-profile", false, nil)
+	args, err := buildBwrapArgs(prog, []string{"arg1"}, false, false, false, nil, nil, nil, nil, "", "my-profile", false, nil, false)
 	require.NoError(t, err)
 
 	// aa-exec -p profile -- must appear immediately before the program.
@@ -336,7 +348,7 @@ func TestBuildBwrapArgsProgramAndArguments(t *testing.T) {
 	resolvedProg, err := resolveProgram(prog)
 	require.NoError(t, err)
 
-	args, err := buildBwrapArgs(prog, []string{"--foo", "bar"}, false, false, false, nil, nil, nil, nil, "", "", false, nil)
+	args, err := buildBwrapArgs(prog, []string{"--foo", "bar"}, false, false, false, nil, nil, nil, nil, "", "", false, nil, false)
 	require.NoError(t, err)
 
 	assert.True(t, containsSeq(args, resolvedProg, "--foo", "bar"))

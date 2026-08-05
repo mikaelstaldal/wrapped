@@ -87,7 +87,7 @@ type Symlink struct {
 
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string) error {
+	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string, unshareCgroup bool) error {
 	if apparmor != "" && !validApparmorProfile.MatchString(apparmor) {
 		return fmt.Errorf("invalid AppArmor profile name %q: must match ^[a-zA-Z0-9._-]+$", apparmor)
 	}
@@ -102,13 +102,13 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 				return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
 			}
 			return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
-				false, false, nil, nil, nil, nil, "", false, true, nil)
+				false, false, nil, nil, nil, nil, "", false, true, nil, false)
 		}
 	}
 
 	if networkMode == NetworkBridge {
 		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, exposeTCP, exposeUDP)
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, exposeTCP, exposeUDP, unshareCgroup)
 	}
 
 	if networkMode == NetworkFiltered {
@@ -117,14 +117,14 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		}
 		return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
 			mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			symlinks, extraEnv, workdir, allEnv, false, tmpfs)
+			symlinks, extraEnv, workdir, allEnv, false, tmpfs, unshareCgroup)
 	}
 
 	if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
 		return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
 	}
 	bwrapArgs, err := buildBwrapArgs(program, arguments, networkMode == NetworkHost, mountCurrentDir, mountCurrentDirWritable,
-		mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs)
+		mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, unshareCgroup)
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,8 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 
 func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
 	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
-	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool, tmpfs []string) error {
+	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool, tmpfs []string,
+	unshareCgroup bool) error {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return fmt.Errorf("nft (nftables) is required for filtered network access: %w; install nftables via your package manager", err)
 	}
@@ -178,7 +179,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 			return err
 		}
 
-		bwrapArgs, err = buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs)
+		bwrapArgs, err = buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs, unshareCgroup)
 		if err != nil {
 			return err
 		}
@@ -388,13 +389,13 @@ func hasIPv6Route() bool {
 
 func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string,
-	exposeTCP, exposeUDP []string) error {
+	exposeTCP, exposeUDP []string, unshareCgroup bool) error {
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return err
 	}
 
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs)
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs, unshareCgroup)
 	if err != nil {
 		return err
 	}
@@ -539,13 +540,14 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) 
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
-	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string) ([]string, error) {
+	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string,
+	unshareCgroup bool) ([]string, error) {
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return nil, err
 	}
 
-	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs)
+	args, err := buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable, symlinks, extraEnv, workdir, allEnv, resolvedProgram, tmpfs, unshareCgroup)
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +572,7 @@ func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir
 
 // buildBaseBwrapArgs builds the common bwrap args shared by all full-sandbox modes:
 // filesystem mounts, current directory, mount points, environment, and core namespace isolation.
-func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, resolvedProgram string, tmpfs []string) ([]string, error) {
+func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, resolvedProgram string, tmpfs []string, unshareCgroup bool) ([]string, error) {
 	var args []string
 
 	args = append(args,
@@ -741,8 +743,11 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 		"--unshare-user",
 		"--unshare-ipc",
 		"--unshare-pid",
-		"--unshare-cgroup-try",
 	)
+
+	if unshareCgroup {
+		args = append(args, "--unshare-cgroup")
+	}
 
 	// Bind-mount the program if not already covered by an existing mount.
 	mountedDirs := collectMountedDirs(mountCurrentDir, cwd, mountReadonly, mountWritable)

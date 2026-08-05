@@ -34,6 +34,7 @@ func main() {
 		allEnv             bool
 		exposeTCP          []string
 		exposeUDP          []string
+		unshareCgroup      bool
 	)
 
 	versionStr := "dev"
@@ -136,6 +137,7 @@ func main() {
 				tmpfs,
 				exposeTCP,
 				exposeUDP,
+				unshareCgroup,
 			)
 		},
 	}
@@ -156,6 +158,7 @@ func main() {
 	f.BoolVar(&allEnv, "all-env", false, "Pass through all environment variables (use with caution, can expose secrets)")
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
+	f.BoolVar(&unshareCgroup, "unshare-cgroup", false, "Unshare the cgroup namespace")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "all-env")
@@ -167,6 +170,7 @@ func main() {
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "workdir")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "env")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "tmpfs")
+	rootCmd.MarkFlagsMutuallyExclusive("only-network", "unshare-cgroup")
 
 	if err := rootCmd.Execute(); err != nil {
 		if exitErr, ok := errors.AsType[*wrapped.ExitError](err); ok {

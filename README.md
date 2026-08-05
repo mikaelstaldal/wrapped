@@ -53,6 +53,7 @@ wrapped [flags] -- program [arguments...]
 | `--all-env`                 | Pass through all environment variables (use with caution, can expose secrets)          |
 | `--apparmor <profile>`      | Run program with an AppArmor profile                                                   |
 | `--only-network`            | Only sandbox the network, leave filesystem untouched                                   |
+| `--unshare-cgroup`          | Unshare the cgroup namespace                                                           |
 
 #### Network modes
 

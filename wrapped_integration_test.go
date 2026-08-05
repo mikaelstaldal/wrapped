@@ -53,7 +53,7 @@ func runInSandbox(t *testing.T, bwrapPath, program string, arguments []string,
 	t.Helper()
 	args, err := buildBwrapArgs(program, arguments, network,
 		mountCurrentDir, mountCurrentDirWritable,
-		mountReadonly, mountWritable, nil, extraEnv, "", "", false, nil)
+		mountReadonly, mountWritable, nil, extraEnv, "", "", false, nil, false)
 	if err != nil {
 		return "", err
 	}
@@ -189,7 +189,7 @@ func TestIntegrationPastaBasic(t *testing.T) {
 	bwrapPath := requireBwrap(t)
 	_ = requirePasta(t)
 
-	bwrapArgs, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, "/usr/bin/true", nil)
+	bwrapArgs, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, "/usr/bin/true", nil, false)
 	require.NoError(t, err)
 	bwrapArgs = append(bwrapArgs,
 		"--uid", "1000",
