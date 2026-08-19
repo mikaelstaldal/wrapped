@@ -101,34 +101,14 @@ sudo, cron and container shells do not set up
 
 when there is no session bus to be found at all. A login shell has one; `su`, `sudo`,
 `cron` and minimal container shells generally do not. `loginctl --user show-session`
-tells you whether the current shell belongs to a session.
+tells you whether the current shell belongs to a session. If wrapped is itself confined
+by an AppArmor profile, see
+[Confining wrapped with AppArmor](#confining-wrapped-with-apparmor) below, which is a
+separate cause of the same symptom.
 
-#### Confining wrapped itself with AppArmor
-
-This concerns an AppArmor profile on the `wrapped` binary, not the `--apparmor` flag.
-
-If you confine wrapped with a profile of your own, its exec rule for `systemd-run` must
-use a **lowercase** mode — `ix`, `px` or `ux`. The uppercase modes `Px`, `Ux` and `Cx`
-scrub the environment through the kernel's unsafe-exec path, the same one used for
-setuid binaries, which sets `AT_SECURE`. systemd reads `DBUS_SESSION_BUS_ADDRESS` and
-`XDG_RUNTIME_DIR` with `secure_getenv()`, which returns nothing when `AT_SECURE` is set,
-so `systemd-run` cannot find the session bus however the environment is set up and fails
-with `Failed to connect to bus: No medium found`. Environment scrubbing is not logged as
-a denial, so nothing appears in `dmesg`.
-
-```
-  /usr/bin/systemd-run ix,
-
-  owner /run/user/[0-9]*/ r,
-  owner /run/user/[0-9]*/bus rw,
-  unix (connect, send, receive) type=stream peer=(addr="/run/user/[0-9]*/bus"),
-```
-
-`ix` runs `systemd-run` under wrapped's own profile, which already has to permit
-`bwrap`; `systemd-run --scope` execs `bwrap` itself, so that rule keeps covering the
-rest of the chain. Limits are applied by the
-corresponding cgroup controllers, which systemd must be delegating to your user; `cpu`
-and `memory` delegation is the default on current systemd versions.
+Limits are applied by the corresponding cgroup controllers, which systemd must be
+delegating to your user; `cpu` and `memory` delegation is the default on current
+systemd versions.
 
 With `--network bridge` or `--network filtered`, the pasta process providing the
 sandbox's network is placed in the same cgroup as the sandbox, so its resource usage
@@ -136,6 +116,41 @@ counts towards the limits too.
 
 `--cgroup` is independent of `--unshare-cgroup`; combine them to also hide the cgroup
 path from the sandboxed program, which then sees its own cgroup as the root.
+
+### Confining wrapped with AppArmor
+
+This is about confining the `wrapped` binary itself, and is unrelated to the
+`--apparmor` flag, which applies a profile to the program *inside* the sandbox.
+
+[`apparmor/wrapped`](apparmor/wrapped) is a profile for wrapped:
+
+```bash
+sudo install -m 644 apparmor/wrapped /etc/apparmor.d/wrapped
+sudo apparmor_parser --replace /etc/apparmor.d/wrapped
+```
+
+It attaches to `~/go/bin/wrapped`, `~/.local/bin/wrapped`, `/usr/local/bin/wrapped` and
+`/usr/bin/wrapped`; edit `@{wrapped_path}` at the top if your binary lives elsewhere, and
+put local additions in `/etc/apparmor.d/local/wrapped` rather than in the profile itself.
+
+The profile is deliberately small, because wrapped opens very little: it execs `bwrap`,
+`pasta`, `nft` and `systemd-run`, and those need privileges the profile itself must not
+carry. Resolving the paths on the command line needs no rules, since wrapped only
+`lstat`s and `readlink`s them.
+
+One rule is worth understanding before you write your own profile:
+
+```
+  /usr/bin/systemd-run pux,
+```
+
+The exec mode for `systemd-run` **must be lowercase**. The uppercase modes (`Px`, `Ux`,
+`Cx`) scrub the environment through the kernel's unsafe-exec path, the one used for
+setuid binaries, which sets `AT_SECURE`. systemd reads `DBUS_SESSION_BUS_ADDRESS` and
+`XDG_RUNTIME_DIR` with `secure_getenv()`, which returns nothing under `AT_SECURE`, so
+`systemd-run` cannot find the session bus however the environment is set up, and
+`--cgroup` fails with `Failed to connect to bus: No medium found`. Environment scrubbing
+is not logged as a denial, so nothing appears in `dmesg` to point at the cause.
 
 ### Environment
 

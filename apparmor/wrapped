@@ -1,0 +1,76 @@
+# AppArmor profile for the wrapped binary itself.
+#
+# This confines wrapped. It is unrelated to wrapped's --apparmor flag, which
+# applies a profile to the program wrapped puts *inside* the sandbox.
+#
+# Install with:
+#
+#     sudo install -m 644 apparmor/wrapped /etc/apparmor.d/wrapped
+#     sudo apparmor_parser --replace /etc/apparmor.d/wrapped
+#
+# The profile attaches only to the paths in @{wrapped_path} below, so adjust
+# that line if your wrapped binary lives somewhere else. Add anything your own
+# use needs to /etc/apparmor.d/local/wrapped rather than editing this file.
+
+abi <abi/3.0>,
+
+include <tunables/global>
+
+@{wrapped_path} = @{HOME}/go/bin/wrapped @{HOME}/.local/bin/wrapped /usr/local/bin/wrapped /usr/bin/wrapped
+
+profile wrapped @{wrapped_path} {
+  include <abstractions/base>
+  include <abstractions/consoles>
+
+  # /etc/resolv.conf, /etc/hosts and /etc/nsswitch.conf, which wrapped reads to
+  # resolve --allow-host, together with the sockets the DNS resolver needs.
+  include <abstractions/nameservice>
+
+  # The Go runtime reads /proc/self/cgroup, /proc/self/mountinfo and
+  # /sys/kernel/mm/transparent_hugepage/hpage_pmd_size at startup, and wrapped
+  # reads /proc/self/exe to name itself as the --network filtered helper.
+  # Narrow to owner @{PROC}/@{pid}/** if you want to keep wrapped out of other
+  # processes' entries.
+  @{PROC}/** r,
+  /sys/** r,
+
+  # Resolving the paths wrapped is given needs no rules of its own: wrapped
+  # only lstats and readlinks them, and mediates neither.
+
+  # wrapped builds the sandbox out of other programs and execs them. They need
+  # privileges this profile must not carry: bwrap creates the namespaces and
+  # mounts, pasta the network, nft the packet filter.
+
+  # systemd-run creates the transient scope for --cgroup, and its exec mode
+  # MUST be lowercase. The uppercase modes (Px, Ux, Cx) scrub the environment
+  # through the kernel's unsafe-exec path, the one used for setuid binaries,
+  # which sets AT_SECURE. systemd reads DBUS_SESSION_BUS_ADDRESS and
+  # XDG_RUNTIME_DIR with secure_getenv(), which returns nothing under
+  # AT_SECURE, so systemd-run then cannot find the session bus however the
+  # environment is set up, and fails with
+  #     Failed to connect to bus: No medium found
+  # Scrubbing is not logged as a denial, so nothing turns up in dmesg either.
+  #
+  # pux runs systemd-run under a profile of its own where one exists and
+  # unconfined where it does not, which is why no D-Bus or session bus socket
+  # rules are needed here.
+  /usr/bin/systemd-run pux,
+
+  # These read nothing from the environment that wrapped depends on, so
+  # scrubbing them costs nothing: bwrap builds the sandbox's environment from
+  # its own --setenv arguments. The exception is --all-env, where the sandboxed
+  # program inherits bwrap's environment and so will not see LD_PRELOAD and
+  # friends; switch bwrap to pux if you need those to carry through.
+  /usr/bin/bwrap PUx,
+  /usr/bin/{passt,pasta} PUx,
+  /usr/{bin,sbin}/nft PUx,
+
+  # --network filtered re-execs wrapped as its internal nft helper, but pasta
+  # is what execs it, so the profile re-attaches on its own and no rule for
+  # executing wrapped itself is needed here.
+
+  # wrapped forwards these to the pasta process it runs as a child.
+  signal (send) set=(int,term,hup,quit),
+
+  include if exists <local/wrapped>
+}
