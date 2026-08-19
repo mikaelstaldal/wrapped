@@ -6,6 +6,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 **wrapped** is a CLI tool that runs programs in a sandbox using [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`). It requires `bwrap` to be installed and in `PATH`. Linux only.
 The `--network bridge` and `--network filtered` modes require `pasta` (from the [passt](https://passt.top/) project). The `--network filtered` mode additionally requires `nft` (nftables).
+The `--cgroup`, `--cpu-limit` and `--memory-limit` flags require `systemd-run` and a systemd user session.
 
 The project is implemented in **Go**:
 -  — library in `wrapped.go`, CLI in `cmd/wrapped/main.go`
@@ -37,6 +38,14 @@ Key design: the tool constructs a `bwrap` command line with namespace isolation 
 2. **Full network** (`--network host`): no network isolation, DNS resolution via `/run/systemd/resolve` if available.
 3. **Bridge network** (`--network bridge`): pasta runs in command mode, creating user+network namespaces and running bwrap as its child (`pasta --config-net ... -- bwrap ...`). All pasta port forwarding and splice forwarding is disabled (`-t none -u none -T none -U none`) to prevent the sandbox from reaching host loopback services. DNS is handled by bind-mounting the non-stub `/run/systemd/resolve/resolv.conf` over the stub resolver. Bwrap's `--uid`/`--gid` flags explicitly map the current user's UID/GID inside the sandbox. IPv4-only mode (`-4`) is used when the host lacks IPv6 routing.
 4. **Filtered network** (`--network filtered`): pasta creates a network namespace (like bridge mode), then nftables rules inside the namespace restrict outbound traffic to only the resolved IPs of allowed hosts. Hosts are resolved at startup. Requires `nft` in PATH. Transparent to applications — no proxy configuration needed.
+
+### Cgroups and resource limits
+
+`--cgroup` (implied by `--cpu-limit` and `--memory-limit`) runs the sandbox in a transient systemd scope, i.e. a cgroup of its own. `buildCgroupPrefix` in `wrapped.go` turns a `Cgroup` value into a `systemd-run --user --scope --quiet --collect [--property ...] --` prefix that is placed in front of the command wrapped would otherwise have run — `bwrap` in the default mode, `pasta` in the bridge and filtered modes, so that pasta shares the sandbox's limits. `systemd-run --scope` execs its command once the scope exists, so the default mode still `syscall.Exec`s and keeps its PID.
+
+systemd is what makes this work unprivileged: it owns the delegated cgroup subtree, so wrapped never has to find a writable cgroup, deal with the no-internal-processes rule, or clean up after itself. Do not replace this with direct writes under `/sys/fs/cgroup`.
+
+The CLI flags are deliberately backend-agnostic: `--cpu-limit` is a number of CPUs and `--memory-limit` a byte count with an optional `K`/`M`/`G`/`T`/`P` suffix. `cpuQuota` and `memoryMax` validate them and translate to systemd's `CPUQuota` percentage and `MemoryMax`. Keep translation in those two functions rather than letting systemd syntax into the CLI.
 
 ### Internal re-exec
 

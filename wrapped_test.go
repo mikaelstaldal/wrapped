@@ -2,6 +2,7 @@ package wrapped
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -197,7 +198,7 @@ func TestWrappedExposeTCPUDPRequiresBridge(t *testing.T) {
 		{NetworkFiltered, nil, []string{"123"}},
 	}
 	for _, c := range cases {
-		err := Wrapped("true", nil, c.network, false, false, nil, nil, nil, nil, "", "", nil, false, false, nil, c.tcp, c.udp, false)
+		err := Wrapped("true", nil, c.network, false, false, nil, nil, nil, nil, "", "", nil, false, false, nil, c.tcp, c.udp, false, Cgroup{})
 		assert.ErrorContains(t, err, "--expose-tcp and --expose-udp can only be used with --network bridge", "expected error for network=%q tcp=%v udp=%v", c.network, c.tcp, c.udp)
 	}
 }
@@ -210,7 +211,7 @@ func TestWrappedRejectsInvalidApparmorProfile(t *testing.T) {
 		"foo|bar",
 	}
 	for _, name := range bad {
-		err := Wrapped("true", nil, NetworkNone, false, false, nil, nil, nil, nil, "", name, nil, false, false, nil, nil, nil, false)
+		err := Wrapped("true", nil, NetworkNone, false, false, nil, nil, nil, nil, "", name, nil, false, false, nil, nil, nil, false, Cgroup{})
 		assert.ErrorContains(t, err, "invalid AppArmor profile name", "expected error for profile %q", name)
 	}
 }
@@ -386,4 +387,114 @@ func TestBuildPastaArgsInvalidPorts(t *testing.T) {
 
 	_, err = buildPastaArgs("/usr/bin/bwrap", nil, nil, []string{"80:443"})
 	assert.Error(t, err, "expected error for invalid UDP port")
+}
+
+func TestCPUQuota(t *testing.T) {
+	cases := map[string]string{
+		"1":     "100%",
+		"2":     "200%",
+		"0.5":   "50%",
+		"1.5":   "150%",
+		"0.25":  "25%",
+		"0.125": "12.5%",
+		"16":    "1600%",
+	}
+	for limit, want := range cases {
+		got, err := cpuQuota(limit)
+		require.NoError(t, err, "limit %q", limit)
+		assert.Equal(t, want, got, "limit %q", limit)
+	}
+}
+
+func TestCPUQuotaInvalid(t *testing.T) {
+	invalid := []string{
+		"",
+		"0",
+		"0.0",
+		"-1",
+		"50%",
+		"one",
+		"1,5",
+		"1 2",
+		"1;rm -rf /",
+	}
+	for _, limit := range invalid {
+		_, err := cpuQuota(limit)
+		assert.Error(t, err, "expected error for CPU limit %q", limit)
+	}
+}
+
+func TestMemoryMax(t *testing.T) {
+	cases := map[string]string{
+		"512M":       "512M",
+		"2G":         "2G",
+		"1024":       "1024",
+		"512m":       "512M",
+		"4g":         "4G",
+		"1T":         "1T",
+		"1024000000": "1024000000",
+	}
+	for limit, want := range cases {
+		got, err := memoryMax(limit)
+		require.NoError(t, err, "limit %q", limit)
+		assert.Equal(t, want, got, "limit %q", limit)
+	}
+}
+
+func TestMemoryMaxInvalid(t *testing.T) {
+	invalid := []string{
+		"",
+		"0",
+		"0M",
+		"-1G",
+		"512MB",
+		"1.5G",
+		"512 M",
+		"lots",
+		"512M; rm -rf /",
+	}
+	for _, limit := range invalid {
+		_, err := memoryMax(limit)
+		assert.Error(t, err, "expected error for memory limit %q", limit)
+	}
+}
+
+func TestBuildCgroupPrefixDisabled(t *testing.T) {
+	prefix, err := buildCgroupPrefix(Cgroup{})
+	require.NoError(t, err)
+	assert.Empty(t, prefix)
+}
+
+func TestBuildCgroupPrefix(t *testing.T) {
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("systemd-run not in PATH")
+	}
+
+	prefix, err := buildCgroupPrefix(Cgroup{Enabled: true})
+	require.NoError(t, err)
+	require.NotEmpty(t, prefix)
+	assert.Equal(t, "systemd-run", filepath.Base(prefix[0]))
+	assert.True(t, containsSeq(prefix, "--user", "--scope"))
+	// The prefix must end with the separator, so the sandbox command follows it.
+	assert.Equal(t, "--", prefix[len(prefix)-1])
+	// No limits requested → no properties.
+	assert.NotContains(t, prefix, "--property")
+
+	prefix, err = buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "1.5", MemoryLimit: "512m"})
+	require.NoError(t, err)
+	assert.True(t, containsSeq(prefix, "--property", "CPUQuota=150%"))
+	assert.True(t, containsSeq(prefix, "--property", "MemoryMax=512M"))
+	assert.Equal(t, "--", prefix[len(prefix)-1])
+}
+
+func TestBuildCgroupPrefixInvalidLimits(t *testing.T) {
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("systemd-run not in PATH")
+	}
+
+	_, err := buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "half"})
+	assert.ErrorContains(t, err, "invalid CPU limit")
+
+	_, err = buildCgroupPrefix(Cgroup{Enabled: true, MemoryLimit: "512MB"})
+	assert.ErrorContains(t, err, "invalid memory limit")
 }

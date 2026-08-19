@@ -44,6 +44,9 @@ func main() {
 		exposeTCP          []string
 		exposeUDP          []string
 		unshareCgroup      bool
+		cgroup             bool
+		cpuLimit           string
+		memoryLimit        string
 	)
 
 	versionStr := "dev"
@@ -116,6 +119,11 @@ func main() {
 				return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
 			}
 
+			// Setting a limit only makes sense in a cgroup of our own.
+			if cpuLimit != "" || memoryLimit != "" {
+				cgroup = true
+			}
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -147,6 +155,11 @@ func main() {
 				exposeTCP,
 				exposeUDP,
 				unshareCgroup,
+				wrapped.Cgroup{
+					Enabled:     cgroup,
+					CPULimit:    cpuLimit,
+					MemoryLimit: memoryLimit,
+				},
 			)
 		},
 	}
@@ -168,6 +181,9 @@ func main() {
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
 	f.BoolVar(&unshareCgroup, "unshare-cgroup", false, "Unshare the cgroup namespace")
+	f.BoolVar(&cgroup, "cgroup", false, "Run the program in a cgroup of its own (requires systemd-run)")
+	f.StringVar(&cpuLimit, "cpu-limit", "", "Limit CPU usage to the given number of CPUs, e.g. 0.5 or 2 (implies --cgroup)")
+	f.StringVar(&memoryLimit, "memory-limit", "", "Limit memory usage, e.g. 512M or 2G (implies --cgroup)")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "all-env")

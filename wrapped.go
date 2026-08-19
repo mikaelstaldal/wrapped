@@ -11,12 +11,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 )
 
 var validApparmorProfile = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 var validPortRange = regexp.MustCompile(`^\d+(-\d+)?$`)
+var validCPULimit = regexp.MustCompile(`^\d+(\.\d+)?$`)
+var validMemoryLimit = regexp.MustCompile(`^\d+[KMGTPkmgtp]?$`)
 
 func validatePortRanges(label string, ports []string) error {
 	for _, p := range ports {
@@ -25,6 +28,86 @@ func validatePortRanges(label string, ports []string) error {
 		}
 	}
 	return nil
+}
+
+// Cgroup describes the cgroup to place the sandboxed program in.
+// A limit implies Enabled; an empty limit means unlimited.
+type Cgroup struct {
+	// Enabled requests that the program runs in a cgroup of its own.
+	Enabled bool
+	// CPULimit is a number of CPUs, for example "0.5" or "2". Empty means unlimited.
+	CPULimit string
+	// MemoryLimit is a number of bytes with an optional K, M, G, T or P suffix,
+	// for example "512M". Empty means unlimited.
+	MemoryLimit string
+}
+
+// cpuQuota converts a CPU limit expressed as a number of CPUs into the percentage
+// form used by systemd's CPUQuota property, where one CPU is 100%.
+func cpuQuota(limit string) (string, error) {
+	if !validCPULimit.MatchString(limit) {
+		return "", fmt.Errorf("invalid CPU limit %q: must be a number of CPUs, for example 0.5 or 2", limit)
+	}
+	cpus, err := strconv.ParseFloat(limit, 64)
+	if err != nil || cpus <= 0 {
+		return "", fmt.Errorf("invalid CPU limit %q: must be greater than zero", limit)
+	}
+	// systemd resolves CPUQuota with permyriad (0.01%) precision, so two decimals
+	// is all it can act on; trailing zeros are dropped for readability.
+	percent := strconv.FormatFloat(cpus*100, 'f', 2, 64)
+	percent = strings.TrimRight(strings.TrimRight(percent, "0"), ".")
+	return percent + "%", nil
+}
+
+// memoryMax converts a memory limit into the form used by systemd's MemoryMax property.
+func memoryMax(limit string) (string, error) {
+	if !validMemoryLimit.MatchString(limit) {
+		return "", fmt.Errorf("invalid memory limit %q: must be a number of bytes with an optional K, M, G, T or P suffix, for example 512M", limit)
+	}
+	upper := strings.ToUpper(limit)
+	if strings.Trim(upper, "0KMGTP") == "" {
+		return "", fmt.Errorf("invalid memory limit %q: must be greater than zero", limit)
+	}
+	return upper, nil
+}
+
+// buildCgroupPrefix returns the command prefix that runs the sandbox in a transient
+// systemd scope, that is, in a cgroup of its own, with the requested limits applied.
+// The first element is the absolute path of systemd-run and doubles as argv[0].
+// It returns nil if no cgroup was requested.
+func buildCgroupPrefix(cgroup Cgroup) ([]string, error) {
+	if !cgroup.Enabled {
+		return nil, nil
+	}
+
+	systemdRunPath, err := exec.LookPath("systemd-run")
+	if err != nil {
+		return nil, fmt.Errorf("systemd-run is required to create a cgroup: %w; install systemd via your package manager", err)
+	}
+
+	// --collect makes systemd garbage-collect the scope even if the program fails.
+	args := []string{
+		systemdRunPath,
+		"--user", "--scope", "--quiet", "--collect",
+		"--description", "wrapped sandbox",
+	}
+
+	if cgroup.CPULimit != "" {
+		quota, err := cpuQuota(cgroup.CPULimit)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--property", "CPUQuota="+quota)
+	}
+	if cgroup.MemoryLimit != "" {
+		max, err := memoryMax(cgroup.MemoryLimit)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--property", "MemoryMax="+max)
+	}
+
+	return append(args, "--"), nil
 }
 
 // ExitError indicates that the sandboxed program exited with a non-zero status.
@@ -87,7 +170,7 @@ type Symlink struct {
 
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string, unshareCgroup bool) error {
+	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string, unshareCgroup bool, cgroup Cgroup) error {
 	if apparmor != "" && !validApparmorProfile.MatchString(apparmor) {
 		return fmt.Errorf("invalid AppArmor profile name %q: must match ^[a-zA-Z0-9._-]+$", apparmor)
 	}
@@ -95,20 +178,20 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	if networkSandboxOnly {
 		switch networkMode {
 		case NetworkBridge:
-			return wrappedPastaNetworkOnly(program, arguments, apparmor, exposeTCP, exposeUDP)
+			return wrappedPastaNetworkOnly(program, arguments, apparmor, exposeTCP, exposeUDP, cgroup)
 
 		case NetworkFiltered:
 			if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
 				return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
 			}
 			return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
-				false, false, nil, nil, nil, nil, "", false, true, nil, false)
+				false, false, nil, nil, nil, nil, "", false, true, nil, false, cgroup)
 		}
 	}
 
 	if networkMode == NetworkBridge {
 		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, exposeTCP, exposeUDP, unshareCgroup)
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, exposeTCP, exposeUDP, unshareCgroup, cgroup)
 	}
 
 	if networkMode == NetworkFiltered {
@@ -117,7 +200,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		}
 		return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
 			mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			symlinks, extraEnv, workdir, allEnv, false, tmpfs, unshareCgroup)
+			symlinks, extraEnv, workdir, allEnv, false, tmpfs, unshareCgroup, cgroup)
 	}
 
 	if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
@@ -134,6 +217,19 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
+	cgroupPrefix, err := buildCgroupPrefix(cgroup)
+	if err != nil {
+		return err
+	}
+	if len(cgroupPrefix) > 0 {
+		// systemd-run --scope execs the command once the scope exists, so the exec
+		// chain is preserved and the sandbox keeps this process's PID.
+		argv := append(append([]string{}, cgroupPrefix...), bwrapPath)
+		argv = append(argv, bwrapArgs...)
+		// exec replaces the current process; if we reach the return, exec failed.
+		return fmt.Errorf("failed to exec systemd-run: %w", syscall.Exec(cgroupPrefix[0], argv, os.Environ()))
+	}
+
 	argv := append([]string{"bwrap"}, bwrapArgs...)
 	// exec replaces the current process; if we reach the return, exec failed.
 	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
@@ -142,7 +238,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
 	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
 	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool, tmpfs []string,
-	unshareCgroup bool) error {
+	unshareCgroup bool, cgroup Cgroup) error {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return fmt.Errorf("nft (nftables) is required for filtered network access: %w; install nftables via your package manager", err)
 	}
@@ -223,7 +319,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 	}
 
 	helperArgs := append([]string{internalNftExecArg, nftScript, bwrapPath}, bwrapArgs...)
-	return runPastaCommand(self, helperArgs, nil, nil)
+	return runPastaCommand(self, helperArgs, nil, nil, cgroup)
 }
 
 // internalNftExecArg marks an invocation of wrapped as the internal nft helper
@@ -428,7 +524,7 @@ func hasIPv6Route() bool {
 
 func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string,
-	exposeTCP, exposeUDP []string, unshareCgroup bool) error {
+	exposeTCP, exposeUDP []string, unshareCgroup bool, cgroup Cgroup) error {
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return err
@@ -466,10 +562,10 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
-	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP)
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, cgroup)
 }
 
-func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string, exposeTCP, exposeUDP []string) error {
+func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string, exposeTCP, exposeUDP []string, cgroup Cgroup) error {
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
@@ -494,7 +590,7 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 	args = append(args, program)
 	args = append(args, arguments...)
 
-	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP)
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, cgroup)
 }
 
 // buildPastaArgs constructs the pasta command-line arguments for command mode.
@@ -536,7 +632,9 @@ func buildPastaArgs(name string, args []string, exposeTCP, exposeUDP []string) (
 // runPastaCommand runs pasta in command mode, where pasta creates the user+network
 // namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
 // coordination protocol that causes ECHILD errors with --unshare-pid.
-func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) error {
+// If a cgroup is requested, pasta is started inside it, so that the sandbox and the
+// network stack serving it share the same limits.
+func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string, cgroup Cgroup) error {
 	pastaArgs, err := buildPastaArgs(name, args, exposeTCP, exposeUDP)
 	if err != nil {
 		return err
@@ -547,13 +645,23 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) 
 		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
 	}
 
-	cmd := exec.Command(pastaPath, pastaArgs...)
+	cgroupPrefix, err := buildCgroupPrefix(cgroup)
+	if err != nil {
+		return err
+	}
+	cmdPath, cmdArgs := pastaPath, pastaArgs
+	if len(cgroupPrefix) > 0 {
+		cmdPath = cgroupPrefix[0]
+		cmdArgs = append(append(append([]string{}, cgroupPrefix[1:]...), pastaPath), pastaArgs...)
+	}
+
+	cmd := exec.Command(cmdPath, cmdArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start pasta: %w", err)
+		return fmt.Errorf("failed to start %s: %w", filepath.Base(cmdPath), err)
 	}
 
 	// Forward signals to the child.
@@ -573,7 +681,7 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string) 
 		if errors.As(err, &exitErr) {
 			return &ExitError{Code: exitErr.ExitCode()}
 		}
-		return fmt.Errorf("pasta failed: %w", err)
+		return fmt.Errorf("%s failed: %w", filepath.Base(cmdPath), err)
 	}
 	return nil
 }

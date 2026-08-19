@@ -1,6 +1,7 @@
 package wrapped
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -60,6 +62,24 @@ func requirePasta(t *testing.T) string {
 		t.Skipf("pasta not functional (namespaces may be restricted): %v: %s", err, out)
 	}
 	return pastaPath
+}
+
+// requireSystemdRun skips the test if systemd-run cannot create a transient user
+// scope, which needs a systemd user session with a reachable session bus.
+func requireSystemdRun(t *testing.T) string {
+	t.Helper()
+	systemdRunPath, err := exec.LookPath("systemd-run")
+	if err != nil {
+		t.Skip("systemd-run not in PATH; skipping integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	probe := exec.CommandContext(ctx, systemdRunPath,
+		"--user", "--scope", "--quiet", "--collect", "--", "/usr/bin/true")
+	if out, err := probe.CombinedOutput(); err != nil {
+		t.Skipf("systemd-run cannot create a user scope: %v: %s", err, out)
+	}
+	return systemdRunPath
 }
 
 // requireNft skips the test if nft is not available.
@@ -296,7 +316,12 @@ func runInSandbox(t *testing.T, bwrapPath, program string, arguments []string,
 	cmd := exec.Command(bwrapPath, args...)
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	return buf.String(), cmd.Run()
+	// Run before reading the buffer. "return buf.String(), cmd.Run()" would not do
+	// that: a return statement evaluates its operands left to right, so the buffer
+	// would be read before the process had even started, and every caller would see
+	// empty output together with a nil error.
+	err = cmd.Run()
+	return buf.String(), err
 }
 
 func TestIntegrationTrueExitsZero(t *testing.T) {
@@ -426,9 +451,13 @@ func TestIntegrationPastaBasic(t *testing.T) {
 
 	bwrapArgs, err := buildBaseBwrapArgs(false, false, nil, nil, nil, nil, "", false, "/usr/bin/true", nil, false)
 	require.NoError(t, err)
+	// The real code uses the current UID/GID here. Hard-coding 1000 only works
+	// where the user happens to be uid 1000; elsewhere (CI runners typically run
+	// as uid 1001) it is an unmapped id inside pasta's user namespace and bwrap
+	// refuses to start.
 	bwrapArgs = append(bwrapArgs,
-		"--uid", "1000",
-		"--gid", "1000",
+		"--uid", strconv.Itoa(os.Getuid()),
+		"--gid", strconv.Itoa(os.Getgid()),
 		"/usr/bin/true",
 	)
 
@@ -437,8 +466,85 @@ func TestIntegrationPastaBasic(t *testing.T) {
 
 	pastaPath, _ := exec.LookPath("pasta")
 	cmd := exec.Command(pastaPath, pastaArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	err = cmd.Run()
-	assert.NoError(t, err, "pasta+bwrap run failed")
+	assert.NoError(t, err, "pasta+bwrap run failed: %s", out.String())
+}
+
+// startCgroupSandbox runs the wrapped CLI with the given cgroup flags on a program
+// that reports its own cgroup and then blocks, so that the test can inspect that
+// cgroup's control files on the host while the sandbox is still alive. It returns
+// the cgroup path and a function that releases the sandboxed program.
+func startCgroupSandbox(t *testing.T, flags ...string) (string, func()) {
+	t.Helper()
+	requireBwrap(t)
+	requireSystemdRun(t)
+	bin := buildWrappedBinary(t)
+	shPath := requireTool(t, "sh")
+
+	args := append(append([]string{}, flags...), "--", shPath, "-c",
+		"cut -d: -f3 /proc/self/cgroup; read _")
+	cmd := exec.Command(bin, args...)
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start(), "wrapped %s", strings.Join(args, " "))
+
+	release := func() {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	}
+	t.Cleanup(release)
+
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		release()
+		t.Fatalf("sandboxed program did not report its cgroup: %v", err)
+	}
+	cgroupPath := strings.TrimSpace(line)
+	require.True(t, strings.HasSuffix(cgroupPath, ".scope"),
+		"expected the program to run in a transient scope, got %q", cgroupPath)
+	return cgroupPath, release
+}
+
+// readCgroupFile reads a control file from the given cgroup, skipping the test if
+// the file is absent because that controller is not delegated to this user.
+func readCgroupFile(t *testing.T, cgroupPath, name string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", cgroupPath, name))
+	if os.IsNotExist(err) {
+		t.Skipf("%s is absent in %s; the controller is not delegated to this user", name, cgroupPath)
+	}
+	require.NoError(t, err)
+	return strings.TrimSpace(string(content))
+}
+
+// TestIntegrationCgroupWithoutLimits checks that --cgroup on its own puts the program
+// in a cgroup of its own without imposing any limit.
+func TestIntegrationCgroupWithoutLimits(t *testing.T) {
+	cgroupPath, _ := startCgroupSandbox(t, "--cgroup")
+	assert.Equal(t, "max", readCgroupFile(t, cgroupPath, "memory.max"))
+	assert.Equal(t, "max 100000", readCgroupFile(t, cgroupPath, "cpu.max"))
+}
+
+// TestIntegrationCgroupLimits checks that the limit flags reach the control files of
+// the cgroup the sandboxed program runs in.
+func TestIntegrationCgroupLimits(t *testing.T) {
+	cgroupPath, _ := startCgroupSandbox(t, "--cpu-limit", "0.5", "--memory-limit", "64M")
+
+	assert.Equal(t, strconv.Itoa(64*1024*1024), readCgroupFile(t, cgroupPath, "memory.max"))
+
+	// cpu.max is "<quota> <period>" in microseconds; 0.5 CPUs is half the period.
+	cpuMax := readCgroupFile(t, cgroupPath, "cpu.max")
+	quotaStr, periodStr, ok := strings.Cut(cpuMax, " ")
+	require.True(t, ok, "unexpected cpu.max contents %q", cpuMax)
+	quota, err := strconv.Atoi(quotaStr)
+	require.NoError(t, err, "unexpected cpu.max contents %q", cpuMax)
+	period, err := strconv.Atoi(periodStr)
+	require.NoError(t, err, "unexpected cpu.max contents %q", cpuMax)
+	assert.Equal(t, period, quota*2, "expected a quota of half the period in %q", cpuMax)
 }
