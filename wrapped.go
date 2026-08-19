@@ -137,13 +137,15 @@ func buildCgroupPrefix(cgroup Cgroup, env []string) ([]string, []string, error) 
 
 	// --collect makes systemd garbage-collect the scope even if the program fails.
 	//
-	// Accounting is requested even when no limit is set: systemd enables a cgroup
-	// controller for a unit only if the unit uses it, so without this a cgroup
-	// created by --cgroup alone would have neither the cpu nor the memory
-	// controller, leaving the program's resource usage unmeasured. Asking for it
-	// explicitly also makes the same control files present whether or not limits
-	// are set, rather than depending on the distribution's DefaultCPUAccounting
-	// and DefaultMemoryAccounting settings.
+	// Accounting is requested even when no limit is set, so that a cgroup created by
+	// --cgroup alone still measures what the program uses, rather than depending on
+	// the distribution's DefaultCPUAccounting and DefaultMemoryAccounting settings.
+	//
+	// This does not make the two symmetric. MemoryAccounting enables the memory
+	// controller for the unit, which is what memory.current and memory.max need. On
+	// cgroup v2 the kernel reports CPU usage in cpu.stat whether or not the cpu
+	// controller is enabled, so CPUAccounting does not enable it and cpu.max exists
+	// only once a CPU limit is actually set.
 	args := []string{
 		systemdRunPath,
 		"--user", "--scope", "--quiet", "--collect",

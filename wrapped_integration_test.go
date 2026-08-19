@@ -511,19 +511,29 @@ func startCgroupSandbox(t *testing.T, flags ...string) (string, func()) {
 	return cgroupPath, release
 }
 
-// readCgroupFile reads a control file from the given cgroup, skipping the test if
-// the file is absent because that controller is not delegated to this user.
-// wrapped asks for CPU and memory accounting on every cgroup it creates, so the
-// cpu and memory control files exist whether or not a limit was set; an absent
-// file means the controller never reached the sandbox's cgroup at all.
-func readCgroupFile(t *testing.T, cgroupPath, name string) string {
+// lookupCgroupFile reads a control file from the given cgroup, reporting whether it
+// exists. A control file is present only where its controller is enabled for that
+// cgroup, which for cpu.max means a CPU limit was set.
+func lookupCgroupFile(t *testing.T, cgroupPath, name string) (string, bool) {
 	t.Helper()
 	content, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", cgroupPath, name))
 	if os.IsNotExist(err) {
-		t.Skipf("%s is absent in %s; the controller is not delegated to this user", name, cgroupPath)
+		return "", false
 	}
 	require.NoError(t, err)
-	return strings.TrimSpace(string(content))
+	return strings.TrimSpace(string(content)), true
+}
+
+// readCgroupFile reads a control file that the run under test must have produced,
+// skipping the test if it is absent because that controller is not delegated to
+// this user rather than because wrapped failed to ask for it.
+func readCgroupFile(t *testing.T, cgroupPath, name string) string {
+	t.Helper()
+	content, ok := lookupCgroupFile(t, cgroupPath, name)
+	if !ok {
+		t.Skipf("%s is absent in %s; the controller is not delegated to this user", name, cgroupPath)
+	}
+	return content
 }
 
 // cpuMaxQuota splits the "<quota> <period>" contents of cpu.max. The quota is
@@ -538,8 +548,7 @@ func cpuMaxQuota(t *testing.T, cpuMax string) (string, int) {
 }
 
 // TestIntegrationCgroupWithoutLimits checks that --cgroup on its own puts the program
-// in a cgroup of its own, with the CPU and memory controllers enabled so that its
-// usage is accounted for, but without imposing any limit.
+// in a cgroup of its own, accounted for but with nothing limited.
 func TestIntegrationCgroupWithoutLimits(t *testing.T) {
 	cgroupPath, _ := startCgroupSandbox(t, "--cgroup")
 
@@ -548,14 +557,20 @@ func TestIntegrationCgroupWithoutLimits(t *testing.T) {
 	assert.NotContains(t, string(ownCgroup), cgroupPath,
 		"the program must run in a cgroup of its own, not in wrapped's caller's")
 
+	// MemoryAccounting enables the memory controller, so these two are present.
 	assert.Equal(t, "max", readCgroupFile(t, cgroupPath, "memory.max"),
 		"--cgroup on its own must not limit memory")
-	quota, _ := cpuMaxQuota(t, readCgroupFile(t, cgroupPath, "cpu.max"))
-	assert.Equal(t, "max", quota, "--cgroup on its own must not limit CPU time")
+	assert.FileExists(t, filepath.Join("/sys/fs/cgroup", cgroupPath, "memory.current"),
+		"memory usage must be accounted for even with no limit set")
 
-	// Accounting must be on, so that a cgroup without limits is still measured.
-	assert.FileExists(t, filepath.Join("/sys/fs/cgroup", cgroupPath, "memory.current"))
-	assert.FileExists(t, filepath.Join("/sys/fs/cgroup", cgroupPath, "cpu.stat"))
+	// cpu.max is absent unless the cpu controller is enabled for the cgroup, and
+	// systemd enables it for a CPU limit rather than for accounting, since cgroup v2
+	// reports CPU usage in cpu.stat without that controller. Absent therefore means
+	// unlimited here, exactly as an explicit "max" quota would.
+	if cpuMax, ok := lookupCgroupFile(t, cgroupPath, "cpu.max"); ok {
+		quota, _ := cpuMaxQuota(t, cpuMax)
+		assert.Equal(t, "max", quota, "--cgroup on its own must not limit CPU time")
+	}
 }
 
 // TestIntegrationCgroupLimits checks that the limit flags reach the control files of
