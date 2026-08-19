@@ -82,7 +82,8 @@ jobs:
         run: |
           if grep --quiet '^--- SKIP' test-output.txt; then
             echo "::error::Tests were skipped; the CI environment is missing something the sandbox needs."
-            grep --after-context=1 '^--- SKIP' test-output.txt
+            # The reason a test skipped is logged on the lines before its SKIP line.
+            grep --before-context=2 --after-context=1 '^--- SKIP' test-output.txt
             exit 1
           fi
           echo "No tests were skipped."

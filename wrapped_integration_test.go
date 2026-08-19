@@ -513,6 +513,9 @@ func startCgroupSandbox(t *testing.T, flags ...string) (string, func()) {
 
 // readCgroupFile reads a control file from the given cgroup, skipping the test if
 // the file is absent because that controller is not delegated to this user.
+// wrapped asks for CPU and memory accounting on every cgroup it creates, so the
+// cpu and memory control files exist whether or not a limit was set; an absent
+// file means the controller never reached the sandbox's cgroup at all.
 func readCgroupFile(t *testing.T, cgroupPath, name string) string {
 	t.Helper()
 	content, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", cgroupPath, name))
@@ -523,12 +526,36 @@ func readCgroupFile(t *testing.T, cgroupPath, name string) string {
 	return strings.TrimSpace(string(content))
 }
 
+// cpuMaxQuota splits the "<quota> <period>" contents of cpu.max. The quota is
+// returned verbatim, since it is "max" when the CPU time is unlimited.
+func cpuMaxQuota(t *testing.T, cpuMax string) (string, int) {
+	t.Helper()
+	quota, periodStr, ok := strings.Cut(cpuMax, " ")
+	require.True(t, ok, "unexpected cpu.max contents %q", cpuMax)
+	period, err := strconv.Atoi(periodStr)
+	require.NoError(t, err, "unexpected cpu.max contents %q", cpuMax)
+	return quota, period
+}
+
 // TestIntegrationCgroupWithoutLimits checks that --cgroup on its own puts the program
-// in a cgroup of its own without imposing any limit.
+// in a cgroup of its own, with the CPU and memory controllers enabled so that its
+// usage is accounted for, but without imposing any limit.
 func TestIntegrationCgroupWithoutLimits(t *testing.T) {
 	cgroupPath, _ := startCgroupSandbox(t, "--cgroup")
-	assert.Equal(t, "max", readCgroupFile(t, cgroupPath, "memory.max"))
-	assert.Equal(t, "max 100000", readCgroupFile(t, cgroupPath, "cpu.max"))
+
+	ownCgroup, err := os.ReadFile("/proc/self/cgroup")
+	require.NoError(t, err)
+	assert.NotContains(t, string(ownCgroup), cgroupPath,
+		"the program must run in a cgroup of its own, not in wrapped's caller's")
+
+	assert.Equal(t, "max", readCgroupFile(t, cgroupPath, "memory.max"),
+		"--cgroup on its own must not limit memory")
+	quota, _ := cpuMaxQuota(t, readCgroupFile(t, cgroupPath, "cpu.max"))
+	assert.Equal(t, "max", quota, "--cgroup on its own must not limit CPU time")
+
+	// Accounting must be on, so that a cgroup without limits is still measured.
+	assert.FileExists(t, filepath.Join("/sys/fs/cgroup", cgroupPath, "memory.current"))
+	assert.FileExists(t, filepath.Join("/sys/fs/cgroup", cgroupPath, "cpu.stat"))
 }
 
 // TestIntegrationCgroupLimits checks that the limit flags reach the control files of
@@ -540,11 +567,8 @@ func TestIntegrationCgroupLimits(t *testing.T) {
 
 	// cpu.max is "<quota> <period>" in microseconds; 0.5 CPUs is half the period.
 	cpuMax := readCgroupFile(t, cgroupPath, "cpu.max")
-	quotaStr, periodStr, ok := strings.Cut(cpuMax, " ")
-	require.True(t, ok, "unexpected cpu.max contents %q", cpuMax)
+	quotaStr, period := cpuMaxQuota(t, cpuMax)
 	quota, err := strconv.Atoi(quotaStr)
-	require.NoError(t, err, "unexpected cpu.max contents %q", cpuMax)
-	period, err := strconv.Atoi(periodStr)
 	require.NoError(t, err, "unexpected cpu.max contents %q", cpuMax)
 	assert.Equal(t, period, quota*2, "expected a quota of half the period in %q", cpuMax)
 }

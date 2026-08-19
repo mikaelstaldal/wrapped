@@ -477,8 +477,15 @@ func TestBuildCgroupPrefix(t *testing.T) {
 	assert.True(t, containsSeq(prefix, "--user", "--scope"))
 	// The prefix must end with the separator, so the sandbox command follows it.
 	assert.Equal(t, "--", prefix[len(prefix)-1])
-	// No limits requested → no properties.
-	assert.NotContains(t, prefix, "--property")
+	// Accounting is always requested, so that a cgroup without limits still gets
+	// the cpu and memory controllers and the program's usage is measured.
+	assert.True(t, containsSeq(prefix, "--property", "CPUAccounting=yes"))
+	assert.True(t, containsSeq(prefix, "--property", "MemoryAccounting=yes"))
+	// No limits requested → no limit properties.
+	for _, arg := range prefix {
+		assert.NotContains(t, arg, "CPUQuota=")
+		assert.NotContains(t, arg, "MemoryMax=")
+	}
 
 	prefix, err = buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "1.5", MemoryLimit: "512m"})
 	require.NoError(t, err)

@@ -79,7 +79,9 @@ The program to run (the file only, not the directory) is implicitly mounted read
 `--cgroup` runs the program in a cgroup of its own, so that its resource usage is
 accounted for and can be limited separately from the rest of the session. `--cpu-limit`
 and `--memory-limit` set limits on that cgroup and imply `--cgroup`, so a cgroup can also
-be created without any limits at all.
+be created without any limits at all. CPU and memory accounting is enabled either way,
+so a cgroup created without limits still measures the program's usage; read it from
+`cpu.stat` and `memory.current` in the cgroup the program reports in `/proc/self/cgroup`.
 
 `--cpu-limit` is a number of CPUs, so `1` allows one CPU worth of runtime and `0.5` half
 of one. Fractions are supported down to a hundredth of a CPU. `--memory-limit` is a number
