@@ -52,7 +52,7 @@ jobs:
       - name: Build
         run: |
           go build -tags netgo ./...
-          go build -tags netgo -o "$RUNNER_TEMP/wrapped" ./cmd/wrapped
+          go build -trimpath -buildvcs=true -tags netgo -o "$RUNNER_TEMP/wrapped" ./cmd/wrapped
 
       - name: Lint
         run: golangci-lint run ./...

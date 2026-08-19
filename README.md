@@ -25,7 +25,7 @@ go install -tags netgo github.com/mikaelstaldal/wrapped/cmd/wrapped@latest
 To build with version information baked in:
 
 ```bash
-go build -tags netgo -ldflags "-X main.version=0.1.0 -X \"main.commit=$(git rev-parse --short HEAD) $(git log -1 --format=%ci)\"" ./cmd/wrapped
+go build -trimpath -buildvcs=true -tags netgo -ldflags "-X main.version=0.1.0" ./cmd/wrapped
 ```
 
 Without `-ldflags`, `wrapped --version` prints `dev`.

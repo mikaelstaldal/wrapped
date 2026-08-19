@@ -52,33 +52,32 @@ func main() {
 	versionStr := "dev"
 	if version != "" {
 		versionStr = version
-
-		info, ok := debug.ReadBuildInfo()
-		if ok {
-			settings := make(map[string]string, len(info.Settings))
-			for _, s := range info.Settings {
-				settings[s.Key] = s.Value
-			}
-			versionStr += " ("
-			if vcs, ok := settings["vcs"]; ok {
-				versionStr += vcs + " "
-			}
-			if rev, ok := settings["vcs.revision"]; ok {
-				versionStr += "revision " + rev
-			}
-			modified := settings["vcs.modified"] == "true"
-			if modified {
-				versionStr += " (dirty)"
-			}
-			if t, ok := settings["vcs.time"]; ok {
-				if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
-					versionStr += " " + parsedTime.Local().Format("2006-01-02 15:04:05")
-				} else {
-					versionStr += " " + t
-				}
-			}
-			versionStr += ")"
+	}
+	info, ok := debug.ReadBuildInfo()
+	if ok {
+		settings := make(map[string]string, len(info.Settings))
+		for _, s := range info.Settings {
+			settings[s.Key] = s.Value
 		}
+		versionStr += " ("
+		if vcs, ok := settings["vcs"]; ok {
+			versionStr += vcs + " "
+		}
+		if rev, ok := settings["vcs.revision"]; ok {
+			versionStr += "revision " + rev
+		}
+		modified := settings["vcs.modified"] == "true"
+		if modified {
+			versionStr += " (dirty)"
+		}
+		if t, ok := settings["vcs.time"]; ok {
+			if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
+				versionStr += " " + parsedTime.Local().Format("2006-01-02 15:04:05")
+			} else {
+				versionStr += " " + t
+			}
+		}
+		versionStr += ")"
 	}
 
 	rootCmd := &cobra.Command{

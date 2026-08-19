@@ -14,7 +14,7 @@ The project is implemented in **Go**:
 ## Build & Run
 
 ```bash
-go build -tags netgo -o wrapped ./cmd/wrapped
+go build -trimpath -buildvcs=true -tags netgo -o wrapped ./cmd/wrapped
 golangci-lint run ./...
 go test ./...
 ```
