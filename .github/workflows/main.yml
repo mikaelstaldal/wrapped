@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  integration-tests:
-    name: Integration tests
+  build:
+    name: Build
     runs-on: ubuntu-latest
 
     # Not the default shell: this gets pipefail, without which the exit status of
