@@ -71,18 +71,68 @@ func memoryMax(limit string) (string, error) {
 	return upper, nil
 }
 
+// systemdUserBusEnv returns the environment to run systemd-run with, and an error if
+// this process has no reachable systemd user session bus.
+//
+// systemd-run --user finds the session bus through DBUS_SESSION_BUS_ADDRESS, or
+// through XDG_RUNTIME_DIR, whose "bus" entry is the socket. With neither variable set
+// it fails with the rather opaque "Failed to connect to bus: No medium found". A shell
+// that inherited neither variable can still have a perfectly good session bus at the
+// standard path, so fall back to that rather than failing, and report the situation in
+// wrapped's own terms when there is no bus to be found at all.
+func systemdUserBusEnv(env []string) ([]string, error) {
+	return systemdUserBusEnvAt(env, fmt.Sprintf("/run/user/%d", os.Getuid()))
+}
+
+// systemdUserBusEnvAt is systemdUserBusEnv with the standard runtime directory of the
+// current user passed in, so that the fallback can be exercised in tests.
+func systemdUserBusEnvAt(env []string, standardRuntimeDir string) ([]string, error) {
+	// An explicit address may point anywhere, including a socket of a kind that
+	// cannot be stat'ed, so take it as given.
+	if _, ok := os.LookupEnv("DBUS_SESSION_BUS_ADDRESS"); ok {
+		return env, nil
+	}
+
+	runtimeDir, fromEnv := os.LookupEnv("XDG_RUNTIME_DIR")
+	if !fromEnv {
+		runtimeDir = standardRuntimeDir
+	}
+
+	if _, err := os.Stat(filepath.Join(runtimeDir, "bus")); err != nil {
+		if fromEnv {
+			return nil, fmt.Errorf("no systemd user session bus at %s/bus (XDG_RUNTIME_DIR): %w; "+
+				"a cgroup needs a systemd user session", runtimeDir, err)
+		}
+		return nil, fmt.Errorf("no systemd user session bus: neither DBUS_SESSION_BUS_ADDRESS nor "+
+			"XDG_RUNTIME_DIR is set and %s/bus does not exist; a cgroup needs a systemd user session, "+
+			"which su, sudo, cron and container shells do not set up", runtimeDir)
+	}
+
+	if fromEnv {
+		return env, nil
+	}
+	// The session bus is there, only the variable pointing at it is missing.
+	return append(env, "XDG_RUNTIME_DIR="+runtimeDir), nil
+}
+
 // buildCgroupPrefix returns the command prefix that runs the sandbox in a transient
-// systemd scope, that is, in a cgroup of its own, with the requested limits applied.
-// The first element is the absolute path of systemd-run and doubles as argv[0].
-// It returns nil if no cgroup was requested.
-func buildCgroupPrefix(cgroup Cgroup) ([]string, error) {
+// systemd scope, that is, in a cgroup of its own, with the requested limits applied,
+// together with the environment the sandbox must run with. The first element of the
+// prefix is the absolute path of systemd-run and doubles as argv[0]. The prefix is nil
+// if no cgroup was requested; the environment is always the one to use.
+func buildCgroupPrefix(cgroup Cgroup, env []string) ([]string, []string, error) {
 	if !cgroup.Enabled {
-		return nil, nil
+		return nil, env, nil
 	}
 
 	systemdRunPath, err := exec.LookPath("systemd-run")
 	if err != nil {
-		return nil, fmt.Errorf("systemd-run is required to create a cgroup: %w; install systemd via your package manager", err)
+		return nil, nil, fmt.Errorf("systemd-run is required to create a cgroup: %w; install systemd via your package manager", err)
+	}
+
+	env, err = systemdUserBusEnv(env)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// --collect makes systemd garbage-collect the scope even if the program fails.
@@ -105,19 +155,19 @@ func buildCgroupPrefix(cgroup Cgroup) ([]string, error) {
 	if cgroup.CPULimit != "" {
 		quota, err := cpuQuota(cgroup.CPULimit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		args = append(args, "--property", "CPUQuota="+quota)
 	}
 	if cgroup.MemoryLimit != "" {
 		max, err := memoryMax(cgroup.MemoryLimit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		args = append(args, "--property", "MemoryMax="+max)
 	}
 
-	return append(args, "--"), nil
+	return append(args, "--"), env, nil
 }
 
 // ExitError indicates that the sandboxed program exited with a non-zero status.
@@ -227,7 +277,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
-	cgroupPrefix, err := buildCgroupPrefix(cgroup)
+	cgroupPrefix, env, err := buildCgroupPrefix(cgroup, os.Environ())
 	if err != nil {
 		return err
 	}
@@ -237,12 +287,12 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		argv := append(append([]string{}, cgroupPrefix...), bwrapPath)
 		argv = append(argv, bwrapArgs...)
 		// exec replaces the current process; if we reach the return, exec failed.
-		return fmt.Errorf("failed to exec systemd-run: %w", syscall.Exec(cgroupPrefix[0], argv, os.Environ()))
+		return fmt.Errorf("failed to exec systemd-run: %w", syscall.Exec(cgroupPrefix[0], argv, env))
 	}
 
 	argv := append([]string{"bwrap"}, bwrapArgs...)
 	// exec replaces the current process; if we reach the return, exec failed.
-	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, os.Environ()))
+	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, env))
 }
 
 func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
@@ -655,7 +705,7 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string, 
 		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
 	}
 
-	cgroupPrefix, err := buildCgroupPrefix(cgroup)
+	cgroupPrefix, env, err := buildCgroupPrefix(cgroup, os.Environ())
 	if err != nil {
 		return err
 	}
@@ -666,6 +716,7 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string, 
 	}
 
 	cmd := exec.Command(cmdPath, cmdArgs...)
+	cmd.Env = env
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

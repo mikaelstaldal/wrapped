@@ -90,7 +90,18 @@ program exceeding its memory limit is killed by the kernel's OOM killer.
 
 These flags require `systemd-run` to be installed and in `PATH`, and a systemd user
 session with a reachable session bus. wrapped runs the sandbox in a transient systemd
-scope, which systemd removes once the program exits. Limits are applied by the
+scope, which systemd removes once the program exits. The session bus is found through
+`DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`; when a shell has inherited neither,
+wrapped falls back to the standard `/run/user/<uid>/bus`, and reports
+
+```
+no systemd user session bus: ...; a cgroup needs a systemd user session, which su,
+sudo, cron and container shells do not set up
+```
+
+when there is no session bus to be found at all. A login shell has one; `su`, `sudo`,
+`cron` and minimal container shells generally do not. `loginctl --user show-session`
+tells you whether the current shell belongs to a session. Limits are applied by the
 corresponding cgroup controllers, which systemd must be delegating to your user; `cpu`
 and `memory` delegation is the default on current systemd versions.
 

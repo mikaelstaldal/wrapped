@@ -1,6 +1,7 @@
 package wrapped
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -459,18 +460,118 @@ func TestMemoryMaxInvalid(t *testing.T) {
 	}
 }
 
+// withSessionBus points XDG_RUNTIME_DIR at a directory holding a "bus" entry, so that
+// the cgroup helpers find a session bus regardless of the machine running the tests.
+func withSessionBus(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bus"), nil, 0o600))
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	require.NoError(t, os.Unsetenv("DBUS_SESSION_BUS_ADDRESS"))
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+}
+
+func TestSystemdUserBusEnvExplicitAddress(t *testing.T) {
+	// An explicit address is taken as given, even with no XDG_RUNTIME_DIR.
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/somewhere/else")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	require.NoError(t, os.Unsetenv("XDG_RUNTIME_DIR"))
+
+	env, err := systemdUserBusEnv([]string{"FOO=bar"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"FOO=bar"}, env)
+}
+
+func TestSystemdUserBusEnvFromRuntimeDir(t *testing.T) {
+	withSessionBus(t)
+
+	env, err := systemdUserBusEnv([]string{"FOO=bar"})
+	require.NoError(t, err)
+	// The variable is already set, so the environment is left alone.
+	assert.Equal(t, []string{"FOO=bar"}, env)
+}
+
+// unsetBusVars clears both variables systemd-run uses to find the session bus, as a
+// shell started by su, sudo or cron leaves them.
+func unsetBusVars(t *testing.T) {
+	t.Helper()
+	// t.Setenv registers the restore; Unsetenv then removes the variable itself.
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	require.NoError(t, os.Unsetenv("DBUS_SESSION_BUS_ADDRESS"))
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	require.NoError(t, os.Unsetenv("XDG_RUNTIME_DIR"))
+}
+
+// TestSystemdUserBusEnvFallsBackToStandardPath covers a shell that inherited neither
+// variable: the session bus is still at the standard path, so wrapped points
+// systemd-run at it instead of failing the way plain systemd-run would.
+func TestSystemdUserBusEnvFallsBackToStandardPath(t *testing.T) {
+	unsetBusVars(t)
+	runtimeDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(runtimeDir, "bus"), nil, 0o600))
+
+	env, err := systemdUserBusEnvAt([]string{"FOO=bar"}, runtimeDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"FOO=bar", "XDG_RUNTIME_DIR=" + runtimeDir}, env)
+}
+
+// TestSystemdUserBusEnvNoSessionAtAll covers the reported failure: with neither
+// variable set and no bus at the standard path, systemd-run would report only
+// "Failed to connect to bus: No medium found".
+func TestSystemdUserBusEnvNoSessionAtAll(t *testing.T) {
+	unsetBusVars(t)
+	standardPath := filepath.Join(t.TempDir(), "run-user")
+
+	_, err := systemdUserBusEnvAt(nil, standardPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no systemd user session bus")
+	assert.Contains(t, err.Error(), standardPath)
+	assert.Contains(t, err.Error(), "systemd user session")
+}
+
+// TestSystemdUserBusEnvUsesRealStandardPath checks that the wrapper passes the current
+// user's own runtime directory to the fallback.
+func TestSystemdUserBusEnvUsesRealStandardPath(t *testing.T) {
+	unsetBusVars(t)
+	standardPath := fmt.Sprintf("/run/user/%d", os.Getuid())
+
+	env, err := systemdUserBusEnv(nil)
+	if _, statErr := os.Stat(filepath.Join(standardPath, "bus")); statErr != nil {
+		assert.ErrorContains(t, err, standardPath)
+		return
+	}
+	require.NoError(t, err)
+	assert.Equal(t, []string{"XDG_RUNTIME_DIR=" + standardPath}, env)
+}
+
+func TestSystemdUserBusEnvMissingBus(t *testing.T) {
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	require.NoError(t, os.Unsetenv("DBUS_SESSION_BUS_ADDRESS"))
+	// Set but bus-less, as in a sandbox that does not carry the socket in.
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	_, err := systemdUserBusEnv(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no systemd user session bus")
+	assert.Contains(t, err.Error(), "XDG_RUNTIME_DIR")
+}
+
 func TestBuildCgroupPrefixDisabled(t *testing.T) {
-	prefix, err := buildCgroupPrefix(Cgroup{})
+	prefix, env, err := buildCgroupPrefix(Cgroup{}, []string{"FOO=bar"})
 	require.NoError(t, err)
 	assert.Empty(t, prefix)
+	// Without a cgroup the environment must pass through untouched, and no session
+	// bus is needed at all.
+	assert.Equal(t, []string{"FOO=bar"}, env)
 }
 
 func TestBuildCgroupPrefix(t *testing.T) {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		t.Skip("systemd-run not in PATH")
 	}
+	withSessionBus(t)
 
-	prefix, err := buildCgroupPrefix(Cgroup{Enabled: true})
+	prefix, _, err := buildCgroupPrefix(Cgroup{Enabled: true}, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, prefix)
 	assert.Equal(t, "systemd-run", filepath.Base(prefix[0]))
@@ -487,7 +588,7 @@ func TestBuildCgroupPrefix(t *testing.T) {
 		assert.NotContains(t, arg, "MemoryMax=")
 	}
 
-	prefix, err = buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "1.5", MemoryLimit: "512m"})
+	prefix, _, err = buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "1.5", MemoryLimit: "512m"}, nil)
 	require.NoError(t, err)
 	assert.True(t, containsSeq(prefix, "--property", "CPUQuota=150%"))
 	assert.True(t, containsSeq(prefix, "--property", "MemoryMax=512M"))
@@ -498,10 +599,11 @@ func TestBuildCgroupPrefixInvalidLimits(t *testing.T) {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		t.Skip("systemd-run not in PATH")
 	}
+	withSessionBus(t)
 
-	_, err := buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "half"})
+	_, _, err := buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "half"}, nil)
 	assert.ErrorContains(t, err, "invalid CPU limit")
 
-	_, err = buildCgroupPrefix(Cgroup{Enabled: true, MemoryLimit: "512MB"})
+	_, _, err = buildCgroupPrefix(Cgroup{Enabled: true, MemoryLimit: "512MB"}, nil)
 	assert.ErrorContains(t, err, "invalid memory limit")
 }
