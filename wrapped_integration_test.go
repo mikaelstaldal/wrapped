@@ -25,17 +25,19 @@ func requireBwrap(t *testing.T) string {
 	if err != nil {
 		t.Skip("bwrap not in PATH; skipping integration test")
 	}
-	// Probe: a minimal sandbox to verify user namespaces actually work.
-	probe := exec.Command(bwrapPath,
-		"--ro-bind", "/usr", "/usr",
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--unshare-user",
-		"--unshare-pid",
-		"/usr/bin/true",
-	)
-	if err := probe.Run(); err != nil {
-		t.Skipf("bwrap not functional (user namespaces may be disabled): %v", err)
+	// Probe: run a trivial program through the same argument builder the real
+	// sandbox uses, so the probe cannot drift from it. A hand-written probe that
+	// binds only /usr fails on every system, because the ELF interpreter path
+	// (/lib64/ld-linux-x86-64.so.2) is absolute and needs the /lib64 symlink that
+	// buildBaseBwrapArgs sets up — which looks identical to "namespaces are
+	// disabled" and silently skips every integration test.
+	args, err := buildBwrapArgs("/usr/bin/true", nil, false, false, false, nil, nil, nil, nil, "", "", false, nil, false)
+	if err != nil {
+		t.Skipf("cannot build bwrap arguments: %v", err)
+	}
+	out, err := exec.Command(bwrapPath, args...).CombinedOutput()
+	if err != nil {
+		t.Skipf("bwrap not functional (user namespaces may be disabled): %v: %s", err, out)
 	}
 	return bwrapPath
 }

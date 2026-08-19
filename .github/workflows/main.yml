@@ -49,10 +49,27 @@ jobs:
           curl --version
 
       - name: Build
-        run: go build -tags netgo ./...
+        run: |
+          go build -tags netgo ./...
+          go build -tags netgo -o "$RUNNER_TEMP/wrapped" ./cmd/wrapped
 
       - name: Lint
         run: golangci-lint run ./...
+
+      # The integration tests skip themselves when the sandbox does not work, so
+      # exercise each network mode here first. A broken environment then fails
+      # immediately with bwrap's or pasta's own error message, rather than being
+      # reported later only as an unexplained skip.
+      - name: Verify the sandbox works
+        run: |
+          echo '--- network none ---'
+          "$RUNNER_TEMP/wrapped" -- /usr/bin/true
+          echo '--- network host ---'
+          "$RUNNER_TEMP/wrapped" --network host -- /usr/bin/true
+          echo '--- network bridge ---'
+          "$RUNNER_TEMP/wrapped" --network bridge -- /usr/bin/true
+          echo '--- network filtered ---'
+          "$RUNNER_TEMP/wrapped" --allow-host example.com -- /usr/bin/true
 
       - name: Test
         run: go test ./... -v -timeout 15m 2>&1 | tee test-output.txt
