@@ -101,7 +101,32 @@ sudo, cron and container shells do not set up
 
 when there is no session bus to be found at all. A login shell has one; `su`, `sudo`,
 `cron` and minimal container shells generally do not. `loginctl --user show-session`
-tells you whether the current shell belongs to a session. Limits are applied by the
+tells you whether the current shell belongs to a session.
+
+#### Confining wrapped itself with AppArmor
+
+This concerns an AppArmor profile on the `wrapped` binary, not the `--apparmor` flag.
+
+If you confine wrapped with a profile of your own, its exec rule for `systemd-run` must
+use a **lowercase** mode — `ix`, `px` or `ux`. The uppercase modes `Px`, `Ux` and `Cx`
+scrub the environment through the kernel's unsafe-exec path, the same one used for
+setuid binaries, which sets `AT_SECURE`. systemd reads `DBUS_SESSION_BUS_ADDRESS` and
+`XDG_RUNTIME_DIR` with `secure_getenv()`, which returns nothing when `AT_SECURE` is set,
+so `systemd-run` cannot find the session bus however the environment is set up and fails
+with `Failed to connect to bus: No medium found`. Environment scrubbing is not logged as
+a denial, so nothing appears in `dmesg`.
+
+```
+  /usr/bin/systemd-run ix,
+
+  owner /run/user/[0-9]*/ r,
+  owner /run/user/[0-9]*/bus rw,
+  unix (connect, send, receive) type=stream peer=(addr="/run/user/[0-9]*/bus"),
+```
+
+`ix` runs `systemd-run` under wrapped's own profile, which already has to permit
+`bwrap`; `systemd-run --scope` execs `bwrap` itself, so that rule keeps covering the
+rest of the chain. Limits are applied by the
 corresponding cgroup controllers, which systemd must be delegating to your user; `cpu`
 and `memory` delegation is the default on current systemd versions.
 
