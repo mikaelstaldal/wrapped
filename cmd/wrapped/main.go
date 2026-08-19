@@ -18,6 +18,15 @@ import (
 var version string
 
 func main() {
+	// wrapped re-execs itself for internal helper work; handle that before
+	// interpreting the arguments as a normal sandbox invocation.
+	if handled, err := wrapped.RunInternalCommand(os.Args[1:]); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	var (
 		networkMode        string
 		currentDir         bool

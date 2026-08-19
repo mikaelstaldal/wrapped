@@ -38,6 +38,12 @@ Key design: the tool constructs a `bwrap` command line with namespace isolation 
 3. **Bridge network** (`--network bridge`): pasta runs in command mode, creating user+network namespaces and running bwrap as its child (`pasta --config-net ... -- bwrap ...`). All pasta port forwarding and splice forwarding is disabled (`-t none -u none -T none -U none`) to prevent the sandbox from reaching host loopback services. DNS is handled by bind-mounting the non-stub `/run/systemd/resolve/resolv.conf` over the stub resolver. Bwrap's `--uid`/`--gid` flags explicitly map the current user's UID/GID inside the sandbox. IPv4-only mode (`-4`) is used when the host lacks IPv6 routing.
 4. **Filtered network** (`--network filtered`): pasta creates a network namespace (like bridge mode), then nftables rules inside the namespace restrict outbound traffic to only the resolved IPs of allowed hosts. Hosts are resolved at startup. Requires `nft` in PATH. Transparent to applications — no proxy configuration needed.
 
+### Internal re-exec
+
+The nft rules must be applied inside pasta's namespace but before bwrap, so that `nft` gets `CAP_NET_ADMIN` from pasta's user namespace rather than bwrap's. pasta's command mode runs a single command, so wrapped runs itself as that command: `pasta ... -- wrapped __nft-exec <ruleset> <bwrap> <bwrap args...>`. The `__nft-exec` helper (`RunInternalCommand` in `wrapped.go`, dispatched at the top of `main`) pipes the ruleset to `nft` and, **only if that succeeds**, execs bwrap — so a failure to apply the rules never falls open to an unfiltered network.
+
+The ruleset and the bwrap arguments travel as ordinary argv elements, so no shell and no quoting is involved. Do not reintroduce `sh -c` here. Note that this makes `--network filtered` depend on `os.Executable()`: a program embedding this package must call `wrapped.RunInternalCommand(os.Args[1:])` before parsing its own arguments.
+
 ### Documentation
 
 Keep the documentation in `README.md` up-to-date with command line options etc.

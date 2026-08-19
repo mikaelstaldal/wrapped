@@ -129,19 +129,18 @@ func TestValidateSymlinkSrc(t *testing.T) {
 	assert.Error(t, validateSymlinkSrc("/root/secret", sandbox), "expected error for /root/secret outside sandbox")
 }
 
-func TestShellQuote(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"hello", "'hello'"},
-		{"hello world", "'hello world'"},
-		{"it's", "'it'\\''s'"},
-		{"", "''"},
-		{"/usr/bin/bwrap", "'/usr/bin/bwrap'"},
-		{"foo'bar'baz", "'foo'\\''bar'\\''baz'"},
-	}
-	for _, c := range cases {
-		got := shellQuote(c.in)
-		assert.Equal(t, c.want, got, "shellQuote(%q)", c.in)
-	}
+func TestRunInternalCommand(t *testing.T) {
+	handled, err := RunInternalCommand(nil)
+	assert.False(t, handled, "no arguments must not be an internal invocation")
+	assert.NoError(t, err)
+
+	handled, err = RunInternalCommand([]string{"echo", "hello"})
+	assert.False(t, handled, "a normal invocation must not be treated as internal")
+	assert.NoError(t, err)
+
+	handled, err = RunInternalCommand([]string{internalNftExecArg})
+	assert.True(t, handled, "the internal argument must be handled")
+	assert.Error(t, err, "expected an error when no ruleset and command follow")
 }
 
 func TestParseResolvConf(t *testing.T) {

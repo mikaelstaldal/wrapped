@@ -212,18 +212,62 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 	bwrapArgs = append(bwrapArgs, program)
 	bwrapArgs = append(bwrapArgs, arguments...)
 
-	// Build a shell command that applies nft rules first (inside pasta's namespace,
-	// before bwrap), then execs bwrap. This ensures nft has CAP_NET_ADMIN from
-	// pasta's user namespace rather than bwrap's. The heredoc with a quoted
-	// delimiter passes the ruleset verbatim to nft's stdin — no shell expansion.
-	var execParts []string
-	execParts = append(execParts, "exec "+shellQuote(bwrapPath))
-	for _, arg := range bwrapArgs {
-		execParts = append(execParts, shellQuote(arg))
+	// The nft rules must be applied inside pasta's namespace but before bwrap, so that
+	// nft has CAP_NET_ADMIN from pasta's user namespace rather than bwrap's. pasta's
+	// command mode runs a single command, so wrapped re-execs itself as that command:
+	// the helper applies the ruleset and then execs bwrap. Passing the ruleset and the
+	// bwrap arguments as plain argv elements avoids any shell quoting.
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine own executable path: %w", err)
 	}
-	shellCmd := "nft -f /dev/stdin <<'__NFT_RULES__'\n" + nftScript + "__NFT_RULES__\n" + strings.Join(execParts, " ")
 
-	return runPastaCommand("sh", []string{"-c", shellCmd}, nil, nil)
+	helperArgs := append([]string{internalNftExecArg, nftScript, bwrapPath}, bwrapArgs...)
+	return runPastaCommand(self, helperArgs, nil, nil)
+}
+
+// internalNftExecArg marks an invocation of wrapped as the internal nft helper
+// described in wrappedFilteredNft, rather than a normal sandbox run.
+const internalNftExecArg = "__nft-exec"
+
+// RunInternalCommand handles wrapped's internal helper invocations, in which wrapped
+// re-execs itself to perform setup that must happen inside pasta's namespace. It
+// reports whether args were such an invocation; if so, the caller must not proceed
+// with normal argument parsing.
+//
+// A program embedding this package must call RunInternalCommand with os.Args[1:]
+// before parsing its own arguments, since --network filtered re-execs the running
+// binary (as reported by os.Executable) to reach the helper.
+func RunInternalCommand(args []string) (handled bool, err error) {
+	if len(args) == 0 || args[0] != internalNftExecArg {
+		return false, nil
+	}
+	return true, runNftExec(args[1:])
+}
+
+// runNftExec applies an nftables ruleset and, only if that succeeds, execs the given
+// command. args is the ruleset followed by the command and its arguments.
+func runNftExec(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("%s: expected a ruleset followed by a command", internalNftExecArg)
+	}
+	ruleset, argv := args[0], args[1:]
+
+	nftPath, err := exec.LookPath("nft")
+	if err != nil {
+		return fmt.Errorf("failed to find nft: %w; install nftables via your package manager", err)
+	}
+
+	cmd := exec.Command(nftPath, "-f", "/dev/stdin")
+	cmd.Stdin = strings.NewReader(ruleset)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to apply nftables rules: %w", err)
+	}
+
+	// exec replaces the current process; if we reach the return, exec failed.
+	return fmt.Errorf("failed to exec %s: %w", argv[0], syscall.Exec(argv[0], argv, os.Environ()))
 }
 
 // resolveHosts resolves hostnames to IP addresses, deduplicates, and optionally filters IPv6.
@@ -338,11 +382,6 @@ func buildNftRules(allowedIPs []string, resolverIPs []string) string {
 	}
 	b.WriteString("\t}\n}\n")
 	return b.String()
-}
-
-// shellQuote returns s wrapped in single quotes, safe for use in a shell command.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func resolveProgram(program string) (string, error) {
