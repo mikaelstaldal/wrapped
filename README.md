@@ -209,6 +209,12 @@ Network-only sandbox with filtered network access:
 wrapped --only-network --allow-host example.com curl https://example.com
 ```
 
+## Caveats
+
+The `--only-network` mode provides no effective sandboxing of untrusted programs, and
+it might be possible for a malicious program to even circumvent the network restrictions.
+Use this only to control network access of trusted progams.
+
 ## License
 
 Copyright 2026 Mikael Ståldal.
