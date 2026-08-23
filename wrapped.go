@@ -3,6 +3,7 @@ package wrapped
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var validApparmorProfile = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -29,16 +31,52 @@ func validatePortRanges(label string, ports []string) error {
 	return nil
 }
 
+// CgroupMode says how much a cgroup of the sandbox's own is worth: whether one is
+// created at all, and whether not being able to create one stops the run.
+type CgroupMode int
+
+const (
+	// CgroupAuto creates a cgroup when the system can provide one, and runs without
+	// one when it cannot. This is the zero value, and so what a caller that has no
+	// opinion gets: the cgroup is the stronger of the two levers wrapped has for
+	// taking the sandbox down, worth having whenever it is to be had, but not worth
+	// refusing to run over.
+	CgroupAuto CgroupMode = iota
+	// CgroupDisabled runs the sandbox without a cgroup, leaving the process group as
+	// the only lever. A limit cannot be set in this mode.
+	CgroupDisabled
+	// CgroupRequired refuses to run at all unless the sandbox can be placed in a
+	// cgroup, which is what asking for one, or for a limit, means.
+	CgroupRequired
+)
+
 // Cgroup describes the cgroup to place the sandboxed program in.
-// A limit implies Enabled; an empty limit means unlimited.
+// A limit implies CgroupRequired; an empty limit means unlimited.
 type Cgroup struct {
-	// Enabled requests that the program runs in a cgroup of its own.
-	Enabled bool
+	// Mode says whether to create a cgroup, and how to treat not being able to.
+	Mode CgroupMode
 	// CPULimit is a number of CPUs, for example "0.5" or "2". Empty means unlimited.
 	CPULimit string
 	// MemoryLimit is a number of bytes with an optional K, M, G, T or P suffix,
 	// for example "512M". Empty means unlimited.
 	MemoryLimit string
+}
+
+// limited reports whether any limit is set.
+func (c Cgroup) limited() bool {
+	return c.CPULimit != "" || c.MemoryLimit != ""
+}
+
+// mandatory reports whether anything the cgroup cannot deliver must stop the run
+// rather than be run without.
+//
+// A limit makes it mandatory whatever the mode, since a limit is a requirement rather
+// than a preference: in auto mode because running the program without the limit it was
+// given would defeat the point of giving it, and in disabled mode because a limit with
+// no cgroup to carry it is a contradiction to report rather than something to fall
+// back from.
+func (c Cgroup) mandatory() bool {
+	return c.Mode == CgroupRequired || c.limited()
 }
 
 // cpuQuota converts a CPU limit expressed as a number of CPUs into the percentage
@@ -114,13 +152,96 @@ func systemdUserBusEnvAt(env []string, standardRuntimeDir string) ([]string, err
 	return append(env, "XDG_RUNTIME_DIR="+runtimeDir), nil
 }
 
+// resolveCgroupPrefix turns a Cgroup into the command prefix that runs the sandbox in
+// a cgroup of its own, together with the environment the sandbox must run with, and
+// decides what an unavailable cgroup means.
+//
+// In auto mode an unavailable cgroup is not an error: the prefix comes back empty and
+// the sandbox runs without one, which is what a machine with no systemd user session —
+// su, sudo, cron, a container, a distribution without systemd — has always been able
+// to offer. In required mode the same condition is reported, since the caller asked
+// for a cgroup, or for a limit, and getting neither is not what they asked for.
+//
+// The degrading path also runs systemd-run once for real, rather than deciding from
+// the two conditions buildCgroupPrefix can see, because a systemd-run that fails at
+// the point of use is exactly what auto mode must survive. It fails at the point of
+// use, with the very same "cannot find the session bus" symptom, when an AppArmor
+// profile confining wrapped execs it with an uppercase mode; see the profile in
+// apparmor/wrapped. A run that would have worked is not worth losing to a guess.
+func resolveCgroupPrefix(cgroup Cgroup, env []string, unit string) ([]string, []string, error) {
+	// A mode this package does not know is a mistake in the calling program, and the
+	// one thing that must not be treated as roughly auto: degrading is exactly what
+	// makes a wrong value look like it worked. The check belongs here rather than in
+	// buildCgroupPrefix, since this is where an error stops being negotiable.
+	switch cgroup.Mode {
+	case CgroupAuto, CgroupDisabled, CgroupRequired:
+	default:
+		return nil, nil, fmt.Errorf("invalid cgroup mode %d", cgroup.Mode)
+	}
+
+	prefix, cgroupEnv, err := buildCgroupPrefix(cgroup, env, unit)
+	if err != nil {
+		// Only a plain auto-mode run degrades. Everything mandatory is reported: the
+		// cgroup that --cgroup asked for and could not have, and the limit that either
+		// cannot be expressed or was set alongside --no-cgroup.
+		if cgroup.mandatory() {
+			return nil, nil, err
+		}
+		return nil, env, nil
+	}
+	if len(prefix) > 0 && !cgroup.mandatory() {
+		if err := probeSystemdRun(prefix[0], cgroupEnv); err != nil {
+			return nil, env, nil
+		}
+	}
+	return prefix, cgroupEnv, nil
+}
+
+// probeCgroupTimeout bounds the probe below. A systemd that does not answer promptly
+// is one wrapped falls back from rather than waits for.
+const probeCgroupTimeout = 5 * time.Second
+
+// probeSystemdRun reports whether systemd-run can actually put a process in a
+// transient scope for this user, by having it do so for a program that does nothing.
+// The scope is created and collected in the time the probe takes, so it costs one
+// round trip to the session bus and leaves nothing behind.
+//
+// A probe that cannot be run at all — no trivial program to run under it — says
+// nothing about systemd-run and so reports success: the caller then goes on to use
+// systemd-run, which is what it would have done without a probe.
+func probeSystemdRun(systemdRunPath string, env []string) error {
+	nothing, err := exec.LookPath("true")
+	if err != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), probeCgroupTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, systemdRunPath,
+		"--user", "--scope", "--quiet", "--collect",
+		"--description", "wrapped cgroup probe",
+		"--", nothing)
+	cmd.Env = env
+	// Stdin, Stdout and Stderr are left nil, which connects them to /dev/null: what
+	// systemd-run has to say about a cgroup wrapped is prepared to do without is not
+	// worth putting on the terminal the sandboxed program is about to use.
+	return cmd.Run()
+}
+
 // buildCgroupPrefix returns the command prefix that runs the sandbox in a transient
 // systemd scope named unit, that is, in a cgroup of its own, with the requested limits
 // applied, together with the environment the sandbox must run with. The first element
 // of the prefix is the absolute path of systemd-run and doubles as argv[0]. The prefix
 // is nil if no cgroup was requested; the environment is always the one to use.
+//
+// An error here says that a cgroup cannot be created, or that a limit makes no sense,
+// and not what either should cost the run; that is resolveCgroupPrefix's to decide.
 func buildCgroupPrefix(cgroup Cgroup, env []string, unit string) ([]string, []string, error) {
-	if !cgroup.Enabled {
+	if cgroup.Mode == CgroupDisabled {
+		if cgroup.limited() {
+			return nil, nil, fmt.Errorf("a CPU or memory limit needs a cgroup, which is disabled")
+		}
 		return nil, env, nil
 	}
 

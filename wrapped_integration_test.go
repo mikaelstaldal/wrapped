@@ -531,20 +531,24 @@ func TestIntegrationPastaBasic(t *testing.T) {
 	assert.NoError(t, err, "pasta+bwrap run failed: %s", out.String())
 }
 
-// startCgroupSandbox runs the wrapped CLI with the given cgroup flags on a program
+// startSandboxReportingCgroup runs the wrapped CLI with the given flags on a program
 // that reports its own cgroup and then blocks, so that the test can inspect that
-// cgroup's control files on the host while the sandbox is still alive. It returns
-// the cgroup path and a function that releases the sandboxed program.
-func startCgroupSandbox(t *testing.T, flags ...string) (string, func()) {
+// cgroup on the host while the sandbox is still alive, and see which cgroup the
+// program ended up in. It returns the cgroup path and a function that releases the
+// sandboxed program. Anything in env is added to the environment of the wrapped
+// process itself.
+func startSandboxReportingCgroup(t *testing.T, env []string, flags ...string) (string, func()) {
 	t.Helper()
 	requireBwrap(t)
-	requireSystemdRun(t)
 	bin := buildWrappedBinary(t)
 	shPath := requireTool(t, "sh")
 
 	args := append(append([]string{}, flags...), "--", shPath, "-c",
 		"cut -d: -f3 /proc/self/cgroup; read _")
 	cmd := exec.Command(bin, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
 	stdout, err := cmd.StdoutPipe()
@@ -563,9 +567,25 @@ func startCgroupSandbox(t *testing.T, flags ...string) (string, func()) {
 		release()
 		t.Fatalf("sandboxed program did not report its cgroup: %v", err)
 	}
-	cgroupPath := strings.TrimSpace(line)
-	require.True(t, strings.HasSuffix(cgroupPath, ".scope"),
-		"expected the program to run in a transient scope, got %q", cgroupPath)
+	return strings.TrimSpace(line), release
+}
+
+// inWrappedScope reports whether a cgroup path is one of the transient scopes wrapped
+// creates, which scopeUnitName names after wrapped itself. Some other scope — the
+// login session's, or the terminal application's — is one the sandbox merely inherited.
+func inWrappedScope(cgroupPath string) bool {
+	return strings.HasPrefix(filepath.Base(cgroupPath), "wrapped-") &&
+		strings.HasSuffix(cgroupPath, ".scope")
+}
+
+// startCgroupSandbox is startSandboxReportingCgroup for the runs that must end up in a
+// transient scope of wrapped's making.
+func startCgroupSandbox(t *testing.T, flags ...string) (string, func()) {
+	t.Helper()
+	requireSystemdRun(t)
+	cgroupPath, release := startSandboxReportingCgroup(t, nil, flags...)
+	require.True(t, inWrappedScope(cgroupPath),
+		"expected the program to run in a transient scope of its own, got %q", cgroupPath)
 	return cgroupPath, release
 }
 
@@ -603,6 +623,135 @@ func cpuMaxQuota(t *testing.T, cpuMax string) (string, int) {
 	period, err := strconv.Atoi(periodStr)
 	require.NoError(t, err, "unexpected cpu.max contents %q", cpuMax)
 	return quota, period
+}
+
+// fakeSystemdRun puts a systemd-run that fails, and nothing else bar a real "true",
+// on PATH, and gives the bus check an address to be satisfied by, so that the only
+// thing left to fail is running systemd-run itself. That is the AT_SECURE failure of
+// an AppArmor profile with an uppercase exec mode, which no amount of inspection
+// beforehand can predict.
+func fakeSystemdRun(t *testing.T) {
+	t.Helper()
+	truePath := requireTool(t, "true")
+	requireTool(t, "sh")
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "systemd-run"),
+		[]byte("#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n"), 0o755))
+	require.NoError(t, os.Symlink(truePath, filepath.Join(dir, "true")))
+
+	t.Setenv("PATH", dir)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(dir, "bus"))
+}
+
+// TestIntegrationCgroupDegradesWhenSystemdRunFails checks that auto mode falls back
+// when systemd-run fails at the point of use rather than being absent, which is what
+// the probe is there to catch.
+func TestIntegrationCgroupDegradesWhenSystemdRunFails(t *testing.T) {
+	requireIntegration(t)
+	fakeSystemdRun(t)
+
+	prefix, env, err := resolveCgroupPrefix(Cgroup{}, []string{"FOO=bar"}, "wrapped-test.scope")
+	require.NoError(t, err)
+	assert.Empty(t, prefix, "a systemd-run that cannot create a scope must not be used")
+	assert.Equal(t, []string{"FOO=bar"}, env)
+}
+
+// TestIntegrationCgroupRequiredDoesNotProbe checks that the probe is auto mode's alone.
+// Required mode reports what happens when it runs the sandbox for real, and spending a
+// round trip on predicting it would only slow the run down.
+func TestIntegrationCgroupRequiredDoesNotProbe(t *testing.T) {
+	requireIntegration(t)
+	fakeSystemdRun(t)
+
+	prefix, _, err := resolveCgroupPrefix(Cgroup{Mode: CgroupRequired}, nil, "wrapped-test.scope")
+	require.NoError(t, err)
+	require.NotEmpty(t, prefix)
+	assert.Equal(t, "systemd-run", filepath.Base(prefix[0]))
+}
+
+// TestIntegrationCgroupByDefault checks that a run with no cgroup flag at all still
+// puts the program in a cgroup of its own, which is what makes cgroup.kill available
+// for taking the sandbox down without anyone having had to ask for it.
+func TestIntegrationCgroupByDefault(t *testing.T) {
+	requireIntegration(t)
+	cgroupPath, _ := startCgroupSandbox(t)
+
+	ownCgroup, err := os.ReadFile("/proc/self/cgroup")
+	require.NoError(t, err)
+	assert.NotContains(t, string(ownCgroup), cgroupPath,
+		"the program must run in a cgroup of its own, not in wrapped's caller's")
+}
+
+// TestIntegrationNoCgroup checks that --no-cgroup runs the program without a cgroup of
+// its own, leaving it wherever wrapped itself was.
+func TestIntegrationNoCgroup(t *testing.T) {
+	requireIntegration(t)
+	cgroupPath, _ := startSandboxReportingCgroup(t, nil, "--no-cgroup")
+
+	assert.False(t, inWrappedScope(cgroupPath),
+		"--no-cgroup must not create a cgroup, got %q", cgroupPath)
+}
+
+// TestIntegrationCgroupDegradesWithoutSystemdRun checks that the default falls back to
+// running without a cgroup where none can be created, rather than failing — a machine
+// with no systemd, or a shell with no user session, must still be able to run wrapped.
+// The fallback is provoked by a PATH with no systemd-run in it, since that is the one
+// condition a test can arrange on a machine that does have a working systemd.
+func TestIntegrationCgroupDegradesWithoutSystemdRun(t *testing.T) {
+	requireIntegration(t)
+	requireSystemdRun(t)
+
+	// A PATH holding only what the run itself needs to find: bwrap, and the shell the
+	// sandboxed program is. Everything else, systemd-run included, is out of reach.
+	pathDir := t.TempDir()
+	for _, tool := range []string{"bwrap", "sh"} {
+		require.NoError(t, os.Symlink(requireTool(t, tool), filepath.Join(pathDir, tool)))
+	}
+
+	cgroupPath, _ := startSandboxReportingCgroup(t, []string{"PATH=" + pathDir})
+	assert.False(t, inWrappedScope(cgroupPath),
+		"expected the run to fall back to no cgroup, got %q", cgroupPath)
+}
+
+// TestIntegrationCgroupRequiredWithoutSystemdRun checks the other half of the same
+// story: --cgroup asks for a cgroup outright, so a run that cannot have one fails
+// instead of quietly going without.
+func TestIntegrationCgroupRequiredWithoutSystemdRun(t *testing.T) {
+	requireIntegration(t)
+	requireBwrap(t)
+	bin := buildWrappedBinary(t)
+	shPath := requireTool(t, "sh")
+
+	pathDir := t.TempDir()
+	for _, tool := range []string{"bwrap", "sh"} {
+		require.NoError(t, os.Symlink(requireTool(t, tool), filepath.Join(pathDir, tool)))
+	}
+
+	cmd := exec.Command(bin, "--cgroup", "--", shPath, "-c", "exit 0")
+	cmd.Env = append(os.Environ(), "PATH="+pathDir)
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err, "--cgroup must fail where no cgroup can be created: %s", out)
+	assert.Contains(t, string(out), "systemd-run is required to create a cgroup")
+}
+
+// TestIntegrationNoCgroupRejectsCgroupFlags checks that --no-cgroup and the flags that
+// ask for a cgroup cannot be combined, since the two say opposite things.
+func TestIntegrationNoCgroupRejectsCgroupFlags(t *testing.T) {
+	requireIntegration(t)
+	bin := buildWrappedBinary(t)
+
+	for _, flags := range [][]string{
+		{"--no-cgroup", "--cgroup"},
+		{"--no-cgroup", "--cpu-limit", "1"},
+		{"--no-cgroup", "--memory-limit", "512M"},
+	} {
+		args := append(append([]string{}, flags...), "--", "/usr/bin/true")
+		out, err := exec.Command(bin, args...).CombinedOutput()
+		assert.Error(t, err, "expected %v to be rejected: %s", flags, out)
+		assert.Contains(t, string(out), "none of the others can be",
+			"expected a mutual exclusion error for %v", flags)
+	}
 }
 
 // TestIntegrationCgroupWithoutLimits checks that --cgroup on its own puts the program

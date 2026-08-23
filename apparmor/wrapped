@@ -62,8 +62,9 @@ profile wrapped @{wrapped_path} {
   # privileges this profile must not carry: bwrap creates the namespaces and
   # mounts, pasta the network, nft the packet filter.
 
-  # systemd-run creates the transient scope for --cgroup, and its exec mode
-  # MUST be lowercase. The uppercase modes (Px, Ux, Cx) scrub the environment
+  # systemd-run creates the transient scope the sandbox runs in, which wrapped
+  # asks for on every run and --cgroup makes mandatory. Its exec mode MUST be
+  # lowercase. The uppercase modes (Px, Ux, Cx) scrub the environment
   # through the kernel's unsafe-exec path, the one used for setuid binaries,
   # which sets AT_SECURE. systemd reads DBUS_SESSION_BUS_ADDRESS and
   # XDG_RUNTIME_DIR with secure_getenv(), which returns nothing under
@@ -71,6 +72,9 @@ profile wrapped @{wrapped_path} {
   # environment is set up, and fails with
   #     Failed to connect to bus: No medium found
   # Scrubbing is not logged as a denial, so nothing turns up in dmesg either.
+  # Without --cgroup the symptom is quieter, since wrapped then finds that it
+  # cannot create a cgroup and runs the program without one, but the profile is
+  # no less wrong for it.
   #
   # pux runs systemd-run under a profile of its own where one exists and
   # unconfined where it does not, which is why no D-Bus or session bus socket

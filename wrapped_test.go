@@ -559,11 +559,116 @@ func TestSystemdUserBusEnvMissingBus(t *testing.T) {
 }
 
 func TestBuildCgroupPrefixDisabled(t *testing.T) {
-	prefix, env, err := buildCgroupPrefix(Cgroup{}, []string{"FOO=bar"}, "")
+	prefix, env, err := buildCgroupPrefix(Cgroup{Mode: CgroupDisabled}, []string{"FOO=bar"}, "")
 	require.NoError(t, err)
 	assert.Empty(t, prefix)
 	// Without a cgroup the environment must pass through untouched, and no session
 	// bus is needed at all.
+	assert.Equal(t, []string{"FOO=bar"}, env)
+}
+
+func TestBuildCgroupPrefixDisabledWithLimit(t *testing.T) {
+	// A limit needs the cgroup that carries it, so asking for both is a contradiction
+	// rather than a limit that quietly goes unapplied.
+	_, _, err := buildCgroupPrefix(Cgroup{Mode: CgroupDisabled, MemoryLimit: "512M"}, nil, "")
+	assert.ErrorContains(t, err, "needs a cgroup")
+
+	_, _, err = buildCgroupPrefix(Cgroup{Mode: CgroupDisabled, CPULimit: "1"}, nil, "")
+	assert.ErrorContains(t, err, "needs a cgroup")
+}
+
+func TestCgroupMandatory(t *testing.T) {
+	// Nothing asked for: a cgroup is worth having, not worth failing over.
+	assert.False(t, Cgroup{}.mandatory())
+	assert.False(t, Cgroup{Mode: CgroupDisabled}.mandatory())
+	// Asking for one, or for a limit, makes it a requirement — a limit that is not
+	// applied is not a limit.
+	assert.True(t, Cgroup{Mode: CgroupRequired}.mandatory())
+	assert.True(t, Cgroup{CPULimit: "1"}.mandatory())
+	assert.True(t, Cgroup{MemoryLimit: "512M"}.mandatory())
+	// A limit with the cgroup disabled contradicts itself, which is to be reported
+	// rather than resolved by dropping the limit.
+	assert.True(t, Cgroup{Mode: CgroupDisabled, CPULimit: "1"}.mandatory())
+	assert.True(t, Cgroup{Mode: CgroupDisabled, MemoryLimit: "512M"}.mandatory())
+}
+
+// pathWithout returns a PATH holding a single empty directory, so that nothing at all
+// can be looked up in it.
+func pathWithout(t *testing.T) {
+	t.Helper()
+	t.Setenv("PATH", t.TempDir())
+}
+
+func TestResolveCgroupPrefixDegradesWithoutSystemdRun(t *testing.T) {
+	pathWithout(t)
+
+	// The default is to run in a cgroup where there is one to be had, and without one
+	// where there is not, rather than to refuse a machine with no systemd.
+	prefix, env, err := resolveCgroupPrefix(Cgroup{}, []string{"FOO=bar"}, "wrapped-test.scope")
+	require.NoError(t, err)
+	assert.Empty(t, prefix)
+	assert.Equal(t, []string{"FOO=bar"}, env)
+}
+
+func TestResolveCgroupPrefixDegradesWithoutSessionBus(t *testing.T) {
+	dir := t.TempDir()
+	// A systemd-run that records having been run, so that the test can tell that the
+	// missing bus was noticed without anything being exec'd for it.
+	ran := filepath.Join(dir, "ran")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "systemd-run"),
+		fmt.Appendf(nil, "#!/bin/sh\ntouch %s\nexit 1\n", ran), 0o755))
+	t.Setenv("PATH", dir)
+	// Present but bus-less, as in a shell that su, sudo or cron started. Nothing is
+	// exec'd here: the missing bus is reached before the fake systemd-run would be.
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	require.NoError(t, os.Unsetenv("DBUS_SESSION_BUS_ADDRESS"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	prefix, env, err := resolveCgroupPrefix(Cgroup{}, []string{"FOO=bar"}, "wrapped-test.scope")
+	require.NoError(t, err)
+	assert.Empty(t, prefix)
+	assert.Equal(t, []string{"FOO=bar"}, env)
+	assert.NoFileExists(t, ran, "a bus that is not there is not worth running systemd-run to find out")
+}
+
+func TestResolveCgroupPrefixRequiredReportsUnavailable(t *testing.T) {
+	pathWithout(t)
+
+	// Asking for a cgroup outright is asking to be told when there is none.
+	_, _, err := resolveCgroupPrefix(Cgroup{Mode: CgroupRequired}, nil, "wrapped-test.scope")
+	assert.ErrorContains(t, err, "systemd-run is required to create a cgroup")
+
+	// A limit says the same thing, without --cgroup having been passed as well.
+	_, _, err = resolveCgroupPrefix(Cgroup{MemoryLimit: "512M"}, nil, "wrapped-test.scope")
+	assert.ErrorContains(t, err, "systemd-run is required to create a cgroup")
+}
+
+func TestResolveCgroupPrefixDisabledWithLimit(t *testing.T) {
+	// The contradiction has to reach the caller. Nothing about it is a cgroup that
+	// could not be created, so degrading it away would run the program with neither
+	// the cgroup nor the limit it was given, and say nothing about either.
+	_, _, err := resolveCgroupPrefix(Cgroup{Mode: CgroupDisabled, MemoryLimit: "512M"}, nil, "")
+	assert.ErrorContains(t, err, "needs a cgroup")
+
+	_, _, err = resolveCgroupPrefix(Cgroup{Mode: CgroupDisabled, CPULimit: "1"}, nil, "")
+	assert.ErrorContains(t, err, "needs a cgroup")
+}
+
+func TestResolveCgroupPrefixRejectsAnUnknownMode(t *testing.T) {
+	// A mode from outside the three is a mistake in the calling program. Treating it
+	// as auto would run the sandbox and leave the mistake looking like it worked.
+	_, _, err := resolveCgroupPrefix(Cgroup{Mode: CgroupMode(42)}, nil, "")
+	assert.ErrorContains(t, err, "invalid cgroup mode")
+}
+
+func TestResolveCgroupPrefixDisabled(t *testing.T) {
+	// Disabled asks for nothing, so it neither looks for systemd-run nor cares that
+	// there is none.
+	pathWithout(t)
+
+	prefix, env, err := resolveCgroupPrefix(Cgroup{Mode: CgroupDisabled}, []string{"FOO=bar"}, "")
+	require.NoError(t, err)
+	assert.Empty(t, prefix)
 	assert.Equal(t, []string{"FOO=bar"}, env)
 }
 
@@ -573,7 +678,7 @@ func TestBuildCgroupPrefix(t *testing.T) {
 	}
 	withSessionBus(t)
 
-	prefix, _, err := buildCgroupPrefix(Cgroup{Enabled: true}, nil, "wrapped-test.scope")
+	prefix, _, err := buildCgroupPrefix(Cgroup{Mode: CgroupRequired}, nil, "wrapped-test.scope")
 	require.NoError(t, err)
 	require.NotEmpty(t, prefix)
 	assert.Equal(t, "systemd-run", filepath.Base(prefix[0]))
@@ -593,7 +698,7 @@ func TestBuildCgroupPrefix(t *testing.T) {
 		assert.NotContains(t, arg, "MemoryMax=")
 	}
 
-	prefix, _, err = buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "1.5", MemoryLimit: "512m"}, nil, "")
+	prefix, _, err = buildCgroupPrefix(Cgroup{Mode: CgroupRequired, CPULimit: "1.5", MemoryLimit: "512m"}, nil, "")
 	require.NoError(t, err)
 	assert.True(t, containsSeq(prefix, "--property", "CPUQuota=150%"))
 	assert.True(t, containsSeq(prefix, "--property", "MemoryMax=512M"))
@@ -606,10 +711,10 @@ func TestBuildCgroupPrefixInvalidLimits(t *testing.T) {
 	}
 	withSessionBus(t)
 
-	_, _, err := buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "half"}, nil, "")
+	_, _, err := buildCgroupPrefix(Cgroup{Mode: CgroupRequired, CPULimit: "half"}, nil, "")
 	assert.ErrorContains(t, err, "invalid CPU limit")
 
-	_, _, err = buildCgroupPrefix(Cgroup{Enabled: true, MemoryLimit: "512MB"}, nil, "")
+	_, _, err = buildCgroupPrefix(Cgroup{Mode: CgroupRequired, MemoryLimit: "512MB"}, nil, "")
 	assert.ErrorContains(t, err, "invalid memory limit")
 }
 

@@ -34,7 +34,7 @@ const cgroupRoot = "/sys/fs/cgroup"
 const scopeCgroupTimeout = 10 * time.Second
 
 // runSandbox runs the sandbox chain — bwrap, or pasta with bwrap under it, either
-// of them behind systemd-run when a cgroup was asked for — as a child process, and
+// of them behind systemd-run when a cgroup is to be had — as a child process, and
 // does not return until everything that chain started is gone.
 //
 // Termination has two levers, and both are pulled:
@@ -52,12 +52,18 @@ const scopeCgroupTimeout = 10 * time.Second
 // whatever reason.
 func runSandbox(path string, args []string, cgroup Cgroup) error {
 	unit := ""
-	if cgroup.Enabled {
+	if cgroup.Mode != CgroupDisabled {
 		unit = scopeUnitName()
 	}
-	cgroupPrefix, env, err := buildCgroupPrefix(cgroup, os.Environ(), unit)
+	cgroupPrefix, env, err := resolveCgroupPrefix(cgroup, os.Environ(), unit)
 	if err != nil {
 		return err
+	}
+	if len(cgroupPrefix) == 0 {
+		// No cgroup, whether because none was asked for or because none could be had.
+		// The name goes with it: waiting for a scope that will never exist would only
+		// delay the run by the length of the wait.
+		unit = ""
 	}
 
 	cmdPath, cmdArgs := path, args

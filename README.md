@@ -12,7 +12,7 @@ The `--network bridge` mode requires [pasta](https://passt.top/) (from the passt
 
 The `--network filtered` mode (used with `--allow-host`) requires [pasta](https://passt.top/) and `nft` (from the nftables project) to be installed and in `PATH`.
 
-The `--cgroup`, `--cpu-limit` and `--memory-limit` flags require `systemd-run` to be installed and in `PATH`, and a systemd user session.
+Running the program in a cgroup of its own, which wrapped does whenever it can, requires `systemd-run` to be installed and in `PATH`, and a systemd user session. Where there is neither, the program runs without a cgroup; the `--cgroup`, `--cpu-limit` and `--memory-limit` flags make it a requirement instead, and refuse to run without one.
 
 ## Install
 
@@ -56,7 +56,8 @@ wrapped [flags] -- program [arguments...]
 | `--apparmor <profile>`      | Run program with an AppArmor profile                                                   |
 | `--only-network`            | Only sandbox the network, leave filesystem untouched                                   |
 | `--unshare-cgroup`          | Unshare the cgroup namespace                                                           |
-| `--cgroup`                  | Run the program in a cgroup of its own                                                 |
+| `--cgroup`                  | Require a cgroup of the program's own, and refuse to run without one                   |
+| `--no-cgroup`               | Run the program without a cgroup of its own                                            |
 | `--cpu-limit <cpus>`        | Limit CPU usage to the given number of CPUs, e.g. `0.5` or `2` (implies `--cgroup`)    |
 | `--memory-limit <size>`     | Limit memory usage, e.g. `512M` or `2G` (implies `--cgroup`)                           |
 
@@ -74,25 +75,43 @@ wrapped [flags] -- program [arguments...]
 The program to run (the file only, not the directory) is implicitly mounted read-only if not covered by any 
 `--mount`, `--mount-writable`, `--current-dir`, `--current-dir-writable` or automatic mount (`/usr`, `/etc`).
 
-### Resource limits
+### Cgroups and resource limits
 
-`--cgroup` runs the program in a cgroup of its own, so that its resource usage is
-accounted for and can be limited separately from the rest of the session. `--cpu-limit`
-and `--memory-limit` set limits on that cgroup and imply `--cgroup`, so a cgroup can also
-be created without any limits at all. CPU and memory accounting is enabled either way,
-so a cgroup created without limits still measures the program's usage; read it from
-`cpu.stat` and `memory.current` in the cgroup the program reports in `/proc/self/cgroup`.
+wrapped runs the program in a cgroup of its own whenever it can, without being asked
+to, so that the program's resource usage is accounted for separately from the rest of
+the session and so that everything the program starts can be taken down at once — see
+[Lifetime of the sandbox](#lifetime-of-the-sandbox). Where a cgroup cannot be created,
+the program runs without one rather than not at all.
+
+The three cgroup flags say what to do about that:
+
+| Flag                                     | Meaning                                                                          |
+|------------------------------------------|----------------------------------------------------------------------------------|
+| *(none)*                                 | Run in a cgroup where there is one to be had, and without one where there is not  |
+| `--cgroup`                               | Run in a cgroup, and refuse to run at all if that is not possible                 |
+| `--no-cgroup`                            | Run without a cgroup                                                             |
+
+`--no-cgroup` cannot be combined with `--cgroup`, `--cpu-limit` or `--memory-limit`,
+which all ask for the cgroup it declines.
+
+`--cpu-limit` and `--memory-limit` set limits on that cgroup and imply `--cgroup`, so a
+limit is never silently left unapplied. CPU and memory accounting is enabled with or
+without limits, so a cgroup created without any still measures the program's usage; read
+it from `cpu.stat` and `memory.current` in the cgroup the program reports in
+`/proc/self/cgroup`.
 
 `--cpu-limit` is a number of CPUs, so `1` allows one CPU worth of runtime and `0.5` half
 of one. Fractions are supported down to a hundredth of a CPU. `--memory-limit` is a number
 of bytes with an optional `K`, `M`, `G`, `T` or `P` suffix, which are powers of 1024. A
 program exceeding its memory limit is killed by the kernel's OOM killer.
 
-These flags require `systemd-run` to be installed and in `PATH`, and a systemd user
+A cgroup requires `systemd-run` to be installed and in `PATH`, and a systemd user
 session with a reachable session bus. wrapped runs the sandbox in a transient systemd
 scope, which systemd removes once the program exits. The session bus is found through
 `DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`; when a shell has inherited neither,
-wrapped falls back to the standard `/run/user/<uid>/bus`, and reports
+wrapped falls back to the standard `/run/user/<uid>/bus`. Without a cgroup flag, none of
+this stops the run — the program simply runs without a cgroup. With `--cgroup` or a
+limit, wrapped reports
 
 ```
 no systemd user session bus: ...; a cgroup needs a systemd user session, which su,
@@ -114,8 +133,8 @@ With `--network bridge` or `--network filtered`, the pasta process providing the
 sandbox's network is placed in the same cgroup as the sandbox, so its resource usage
 counts towards the limits too.
 
-`--cgroup` is independent of `--unshare-cgroup`; combine them to also hide the cgroup
-path from the sandboxed program, which then sees its own cgroup as the root.
+The cgroup is independent of `--unshare-cgroup`, which hides the cgroup path from the
+sandboxed program, so that it sees its own cgroup as the root.
 
 ### Lifetime of the sandbox
 
@@ -127,12 +146,14 @@ in that last case a reaper process, which wrapped leaves running beside the sand
 exactly this purpose, does it instead.
 
 wrapped runs the sandbox in a process group of its own and takes that group down with
-`SIGKILL`. With `--cgroup` (or either limit flag) it also kills the transient scope's
-cgroup, which is the stronger of the two: the kernel applies it to every process in the
-cgroup at once, whatever its parent, process group or session. Without a cgroup, a
-program that calls `setsid` and a process orphaned by one of the processes above it
-being killed can escape; with one, they cannot. Use `--cgroup` when the program must
-not be able to leave anything behind.
+`SIGKILL`. Whenever the sandbox has a cgroup — which it has by default wherever one can
+be created — it also kills that cgroup, which is the stronger of the two levers: the
+kernel applies it to every process in the cgroup at once, whatever its parent, process
+group or session. Without a cgroup, a program that calls `setsid` and a process orphaned
+by one of the processes above it being killed can escape; with one, they cannot. Pass
+`--cgroup` when the program must not be able to leave anything behind, so that a machine
+that cannot provide a cgroup fails the run rather than running the program with the
+weaker lever.
 
 The sandbox is the terminal's foreground process group while it runs, so `Ctrl-C`,
 `Ctrl-\` and `Ctrl-Z` reach the program directly. wrapped suspends and resumes along
@@ -193,7 +214,9 @@ setuid binaries, which sets `AT_SECURE`. systemd reads `DBUS_SESSION_BUS_ADDRESS
 `XDG_RUNTIME_DIR` with `secure_getenv()`, which returns nothing under `AT_SECURE`, so
 `systemd-run` cannot find the session bus however the environment is set up, and
 `--cgroup` fails with `Failed to connect to bus: No medium found`. Environment scrubbing
-is not logged as a denial, so nothing appears in `dmesg` to point at the cause.
+is not logged as a denial, so nothing appears in `dmesg` to point at the cause. Without
+`--cgroup` the symptom is quieter and no less worth fixing: wrapped finds that it cannot
+create a cgroup and runs the program without one.
 
 ### Environment
 
@@ -232,9 +255,15 @@ Limit the program to half a CPU and 512 MiB of memory:
 wrapped --cpu-limit 0.5 --memory-limit 512M program
 ```
 
-Run in a cgroup of its own without imposing any limit:
+Insist on a cgroup of the program's own, without imposing any limit, and fail if none
+can be created:
 ```bash
 wrapped --cgroup program
+```
+
+Run without a cgroup:
+```bash
+wrapped --no-cgroup program
 ```
 
 Run with network isolation only (no filesystem sandbox):

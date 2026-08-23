@@ -46,6 +46,7 @@ func main() {
 		exposeUDP          []string
 		unshareCgroup      bool
 		cgroup             bool
+		noCgroup           bool
 		cpuLimit           string
 		memoryLimit        string
 	)
@@ -119,11 +120,6 @@ func main() {
 				return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
 			}
 
-			// Setting a limit only makes sense in a cgroup of our own.
-			if cpuLimit != "" || memoryLimit != "" {
-				cgroup = true
-			}
-
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -156,7 +152,7 @@ func main() {
 				exposeUDP,
 				unshareCgroup,
 				wrapped.Cgroup{
-					Enabled:     cgroup,
+					Mode:        cgroupMode(cgroup, noCgroup),
 					CPULimit:    cpuLimit,
 					MemoryLimit: memoryLimit,
 				},
@@ -181,7 +177,8 @@ func main() {
 	f.StringVar(&apparmor, "apparmor", "", "Run program with AppArmor profile")
 	f.BoolVar(&networkSandboxOnly, "only-network", false, "Only sandbox the network, leave filesystem untouched")
 	f.BoolVar(&unshareCgroup, "unshare-cgroup", false, "Unshare the cgroup namespace")
-	f.BoolVar(&cgroup, "cgroup", false, "Run the program in a cgroup of its own (requires systemd-run)")
+	f.BoolVar(&cgroup, "cgroup", false, "Require a cgroup of the program's own, and refuse to run without one (the default is to use one when available)")
+	f.BoolVar(&noCgroup, "no-cgroup", false, "Run the program without a cgroup of its own")
 	f.StringVar(&cpuLimit, "cpu-limit", "", "Limit CPU usage to the given number of CPUs, e.g. 0.5 or 2 (implies --cgroup)")
 	f.StringVar(&memoryLimit, "memory-limit", "", "Limit memory usage, e.g. 512M or 2G (implies --cgroup)")
 
@@ -196,12 +193,35 @@ func main() {
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "env")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "tmpfs")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "unshare-cgroup")
+	// --no-cgroup is at odds with every flag that asks for a cgroup. The three pairs
+	// are spelled out one by one because a single mutually exclusive set would also
+	// rule out --cgroup together with a limit, which is a perfectly sensible thing to
+	// ask for.
+	rootCmd.MarkFlagsMutuallyExclusive("no-cgroup", "cgroup")
+	rootCmd.MarkFlagsMutuallyExclusive("no-cgroup", "cpu-limit")
+	rootCmd.MarkFlagsMutuallyExclusive("no-cgroup", "memory-limit")
 
 	if err := rootCmd.Execute(); err != nil {
 		if exitErr, ok := errors.AsType[*wrapped.ExitError](err); ok {
 			os.Exit(exitErr.Code)
 		}
 		log.Fatal(err)
+	}
+}
+
+// cgroupMode turns the two cgroup flags into the mode the library takes. Neither flag
+// leaves the choice to wrapped, which uses a cgroup where there is one to be had and
+// runs without where there is not; --cgroup makes it a requirement, and --no-cgroup
+// settles for the process group. A limit implies --cgroup, which the library reads off
+// the limit itself.
+func cgroupMode(cgroup, noCgroup bool) wrapped.CgroupMode {
+	switch {
+	case noCgroup:
+		return wrapped.CgroupDisabled
+	case cgroup:
+		return wrapped.CgroupRequired
+	default:
+		return wrapped.CgroupAuto
 	}
 }
 
