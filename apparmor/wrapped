@@ -28,11 +28,32 @@ profile wrapped @{wrapped_path} {
 
   # The Go runtime reads /proc/self/cgroup, /proc/self/mountinfo and
   # /sys/kernel/mm/transparent_hugepage/hpage_pmd_size at startup, and wrapped
-  # reads /proc/self/exe to name itself as the --network filtered helper.
-  # Narrow to owner @{PROC}/@{pid}/** if you want to keep wrapped out of other
-  # processes' entries.
+  # reads /proc/self/exe to name itself as the --network filtered helper and as
+  # the reaper. It also reads the entries of the processes it starts, which the
+  # ptrace rule below is the other half of. Prefix with owner if you want to
+  # keep wrapped out of other users' entries; the sandbox runs as the same user,
+  # so that still leaves it the ones it needs.
   @{PROC}/** r,
   /sys/** r,
+
+  # Terminating the sandbox as a whole is a write of "1" to cgroup.kill in the
+  # transient scope's cgroup, so the read-only rule above is not enough for it.
+  /sys/fs/cgroup/** w,
+
+  # The @{PROC} rule above is not enough on its own either. Reading another
+  # process's entries under /proc is mediated as ptrace "read" whenever that
+  # process runs under a different profile, which everything wrapped starts
+  # does. wrapped reads @{PROC}/@{pid}/stat, to tell the process group it
+  # started apart from a later one that reuses its process id, and
+  # @{PROC}/@{pid}/cgroup, to find the transient scope's cgroup.
+  #
+  # Without this the denial is reported against the *peer*, which is whatever
+  # the programs below resolve to: "unconfined" for a bwrap that has no profile
+  # of its own, and the distribution's "pasta" profile with --network bridge
+  # and --network filtered. Narrow this to those peers if you would rather name
+  # them, at the cost of having to revisit it whenever a distribution starts or
+  # stops shipping a profile for one of them.
+  ptrace (read),
 
   # Resolving the paths wrapped is given needs no rules of its own: wrapped
   # only lstats and readlinks them, and mediates neither.
@@ -67,10 +88,20 @@ profile wrapped @{wrapped_path} {
 
   # --network filtered re-execs wrapped as its internal nft helper, but pasta
   # is what execs it, so the profile re-attaches on its own and no rule for
-  # executing wrapped itself is needed here.
+  # executing wrapped itself is needed there.
+  #
+  # Every run does re-exec wrapped directly, though, as the reaper that takes
+  # the sandbox down if wrapped is killed before it can. ix keeps the reaper
+  # under this profile, which is what it needs: the rules for signalling the
+  # sandbox and for writing cgroup.kill are the ones above.
+  @{wrapped_path} ix,
 
-  # wrapped forwards these to the pasta process it runs as a child.
-  signal (send) set=(int,term,hup,quit),
+  # wrapped forwards these to the sandbox's process group, and takes it down
+  # with kill. stp, stop and cont carry Ctrl-Z and its undoing across to a
+  # sandbox that is in a process group of its own.
+  #
+  # AppArmor's name for SIGTSTP is stp, not tstp; the parser rejects tstp.
+  signal (send) set=(int,term,hup,quit,kill,stp,stop,cont),
 
   include if exists <local/wrapped>
 }

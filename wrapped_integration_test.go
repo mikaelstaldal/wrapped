@@ -9,15 +9,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// requireIntegration skips the test under -short. Every test in this file runs real
+// programs — bwrap, pasta, nft, systemd-run, a shell — and sends real signals, which a
+// machine that confines the test runner may well refuse. `go test -short ./...` is
+// therefore the way to run the unit tests on their own, and every test here must call
+// this first.
+func requireIntegration(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+}
 
 // requireBwrap skips the test if bwrap is not available or if unprivileged user
 // namespaces are not functional on this system.
@@ -102,6 +116,24 @@ func requireTool(t *testing.T, name string) string {
 	return path
 }
 
+// requireSignals skips the test if this process cannot signal a process group of its
+// own. Everything about terminating the sandbox rests on being able to, and some
+// restricted sandboxes and container runtimes refuse it — where they do, a test that
+// cannot kill anything says nothing about whether wrapped can.
+func requireSignals(t *testing.T) {
+	t.Helper()
+	sleepPath := requireTool(t, "sleep")
+	probe := exec.Command(sleepPath, "1")
+	probe.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, probe.Start())
+	err := syscall.Kill(-probe.Process.Pid, syscall.SIGKILL)
+	// The probe exits on its own shortly, so waiting for it is safe either way.
+	_ = probe.Wait()
+	if err != nil {
+		t.Skipf("cannot signal a process group here: %v", err)
+	}
+}
+
 // requireInternet skips the test if the host cannot reach the public internet,
 // which the filtered-network tests need in order to be meaningful.
 func requireInternet(t *testing.T) {
@@ -146,6 +178,17 @@ func buildWrappedBinary(t *testing.T) string {
 }
 
 func TestMain(m *testing.M) {
+	// The code under test re-execs os.Executable to reach its internal helpers, which
+	// under test is this binary. Answering to them here lets the tests exercise the
+	// helpers rather than watching the test binary choke on their arguments.
+	if handled, err := RunInternalCommand(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	var err error
 	repoDir, err = os.Getwd()
 	if err != nil {
@@ -180,6 +223,7 @@ func envWithPathPrefix(dir string) []string {
 // the ruleset to nft unchanged and execs the target command with its arguments intact,
 // including characters that would have needed quoting when this went through a shell.
 func TestIntegrationNftExecPassesArgumentsVerbatim(t *testing.T) {
+	requireIntegration(t)
 	bin := buildWrappedBinary(t)
 	stubDir := stubNft(t, 0)
 	echoPath := requireTool(t, "echo")
@@ -209,6 +253,7 @@ func TestIntegrationNftExecPassesArgumentsVerbatim(t *testing.T) {
 // when applying the nftables rules fails. Failing open here would silently downgrade
 // --network filtered to an unfiltered network.
 func TestIntegrationNftExecFailsClosed(t *testing.T) {
+	requireIntegration(t)
 	bin := buildWrappedBinary(t)
 	stubDir := stubNft(t, 1)
 	shPath := requireTool(t, "sh")
@@ -251,6 +296,7 @@ func curlStatusArgs(curlPath, url string) []string {
 // pasta creates the namespace, wrapped re-execs itself to apply the nftables rules,
 // and the allowed host must still be reachable.
 func TestIntegrationFilteredNetworkAllowsAllowedHost(t *testing.T) {
+	requireIntegration(t)
 	bin := buildWrappedBinary(t)
 	requireBwrap(t)
 	requirePasta(t)
@@ -269,6 +315,7 @@ func TestIntegrationFilteredNetworkAllowsAllowedHost(t *testing.T) {
 // an address that is not among the allowed hosts must be unreachable. A literal IP is
 // used so the attempt does not depend on DNS.
 func TestIntegrationFilteredNetworkBlocksOtherHosts(t *testing.T) {
+	requireIntegration(t)
 	bin := buildWrappedBinary(t)
 	requireBwrap(t)
 	requirePasta(t)
@@ -286,6 +333,7 @@ func TestIntegrationFilteredNetworkBlocksOtherHosts(t *testing.T) {
 // filesystem sandbox rather than --only-network, since that path builds a much
 // longer bwrap argument list for the re-exec to carry.
 func TestIntegrationFilteredNetworkFullSandbox(t *testing.T) {
+	requireIntegration(t)
 	bin := buildWrappedBinary(t)
 	requireBwrap(t)
 	requirePasta(t)
@@ -325,12 +373,14 @@ func runInSandbox(t *testing.T, bwrapPath, program string, arguments []string,
 }
 
 func TestIntegrationTrueExitsZero(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 	_, err := runInSandbox(t, bwrapPath, "/usr/bin/true", nil, false, false, false, nil, nil, nil)
 	assert.NoError(t, err, "expected exit 0")
 }
 
 func TestIntegrationFalseExitsNonZero(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 	_, err := runInSandbox(t, bwrapPath, "/usr/bin/false", nil, false, false, false, nil, nil, nil)
 	require.Error(t, err, "expected non-zero exit from /usr/bin/false")
@@ -340,6 +390,7 @@ func TestIntegrationFalseExitsNonZero(t *testing.T) {
 }
 
 func TestIntegrationStdout(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 	out, err := runInSandbox(t, bwrapPath, "/usr/bin/echo", []string{"hello", "world"}, false, false, false, nil, nil, nil)
 	require.NoError(t, err)
@@ -347,6 +398,7 @@ func TestIntegrationStdout(t *testing.T) {
 }
 
 func TestIntegrationExtraEnv(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 	out, err := runInSandbox(t, bwrapPath, "/usr/bin/sh", []string{"-c", "echo $MYVAR"},
 		false, false, false, nil, nil, []string{"MYVAR=integration-test-value"})
@@ -355,6 +407,7 @@ func TestIntegrationExtraEnv(t *testing.T) {
 }
 
 func TestIntegrationReadonlyMount(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 
 	dir := t.TempDir()
@@ -369,6 +422,7 @@ func TestIntegrationReadonlyMount(t *testing.T) {
 }
 
 func TestIntegrationWritableMount(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 
 	dir := t.TempDir()
@@ -385,6 +439,7 @@ func TestIntegrationWritableMount(t *testing.T) {
 }
 
 func TestIntegrationFilesystemIsolation(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 
 	// /usr must be accessible.
@@ -399,6 +454,7 @@ func TestIntegrationFilesystemIsolation(t *testing.T) {
 }
 
 func TestIntegrationNetworkIsolation(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 
 	// With no-network, loopback should exist but external interfaces should not.
@@ -421,6 +477,7 @@ func TestIntegrationNetworkIsolation(t *testing.T) {
 }
 
 func TestIntegrationCurrentDirMount(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 
 	// Create a temp dir that is NOT under HOME, to avoid the home-dir check.
@@ -446,6 +503,7 @@ func TestIntegrationCurrentDirMount(t *testing.T) {
 }
 
 func TestIntegrationPastaBasic(t *testing.T) {
+	requireIntegration(t)
 	bwrapPath := requireBwrap(t)
 	_ = requirePasta(t)
 
@@ -550,6 +608,7 @@ func cpuMaxQuota(t *testing.T, cpuMax string) (string, int) {
 // TestIntegrationCgroupWithoutLimits checks that --cgroup on its own puts the program
 // in a cgroup of its own, accounted for but with nothing limited.
 func TestIntegrationCgroupWithoutLimits(t *testing.T) {
+	requireIntegration(t)
 	cgroupPath, _ := startCgroupSandbox(t, "--cgroup")
 
 	ownCgroup, err := os.ReadFile("/proc/self/cgroup")
@@ -576,6 +635,7 @@ func TestIntegrationCgroupWithoutLimits(t *testing.T) {
 // TestIntegrationCgroupLimits checks that the limit flags reach the control files of
 // the cgroup the sandboxed program runs in.
 func TestIntegrationCgroupLimits(t *testing.T) {
+	requireIntegration(t)
 	cgroupPath, _ := startCgroupSandbox(t, "--cpu-limit", "0.5", "--memory-limit", "64M")
 
 	assert.Equal(t, strconv.Itoa(64*1024*1024), readCgroupFile(t, cgroupPath, "memory.max"))
@@ -586,4 +646,354 @@ func TestIntegrationCgroupLimits(t *testing.T) {
 	quota, err := strconv.Atoi(quotaStr)
 	require.NoError(t, err, "unexpected cpu.max contents %q", cpuMax)
 	assert.Equal(t, period, quota*2, "expected a quota of half the period in %q", cpuMax)
+}
+
+// waitForFile blocks until path exists, failing the test if it never does.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared", path)
+}
+
+// processesMatching returns the ids of the processes whose command line contains
+// marker. Everything the sandbox consists of carries the marker, since wrapped hands
+// the program's command line down to bwrap and pasta as arguments of their own, so an
+// empty result means the whole sandbox is gone.
+func processesMatching(t *testing.T, marker string) []int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	require.NoError(t, err)
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue // Exited between the listing and the read, or is not ours.
+		}
+		if bytes.Contains(cmdline, []byte(marker)) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// assertSandboxGone waits for every process carrying the marker to disappear.
+func assertSandboxGone(t *testing.T, marker string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var left []int
+	for time.Now().Before(deadline) {
+		left = processesMatching(t, marker)
+		if len(left) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, pid := range left {
+		cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		t.Logf("still running: %d %s", pid, bytes.ReplaceAll(cmdline, []byte{0}, []byte{' '}))
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	t.Fatalf("%d process(es) of the sandbox outlived wrapped", len(left))
+}
+
+// startMarkedSandbox runs the wrapped CLI on a program that never exits, and returns
+// the running command together with the marker that identifies every process of the
+// sandbox. It returns once the sandboxed program is known to be running.
+func startMarkedSandbox(t *testing.T, flags ...string) (*exec.Cmd, string) {
+	t.Helper()
+	requireSignals(t)
+	requireBwrap(t)
+	bin := buildWrappedBinary(t)
+	shPath := requireTool(t, "sh")
+
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	marker := fmt.Sprintf("wrapped-liveness-%d-%d", os.Getpid(), time.Now().UnixNano())
+	// The marker rides along in a comment, so that it shows up in the command line of
+	// every process wrapped starts without changing what the program does.
+	script := fmt.Sprintf("touch %s; while :; do sleep 1; done # %s", ready, marker)
+
+	args := append(append([]string{}, flags...), "--mount-writable", dir, "--", shPath, "-c", script)
+	cmd := exec.Command(bin, args...)
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start(), "wrapped %s", strings.Join(args, " "))
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		for _, pid := range processesMatching(t, marker) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+
+	waitForFile(t, ready, 60*time.Second)
+	require.NotEmpty(t, processesMatching(t, marker), "the sandbox should be running")
+	return cmd, marker
+}
+
+// TestIntegrationSandboxDiesWhenWrappedIsTerminated checks that a sandboxed program
+// that would otherwise run forever, and the bwrap processes around it, are gone once
+// wrapped has been asked to stop.
+func TestIntegrationSandboxDiesWhenWrappedIsTerminated(t *testing.T) {
+	requireIntegration(t)
+	cmd, marker := startMarkedSandbox(t)
+
+	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	_ = cmd.Wait()
+
+	assertSandboxGone(t, marker, 30*time.Second)
+}
+
+// TestIntegrationSandboxDiesWhenWrappedIsKilled checks the same for a wrapped that
+// never got the chance to clean up after itself, which is what the reaper is for.
+func TestIntegrationSandboxDiesWhenWrappedIsKilled(t *testing.T) {
+	requireIntegration(t)
+	cmd, marker := startMarkedSandbox(t)
+
+	require.NoError(t, cmd.Process.Signal(syscall.SIGKILL))
+	_ = cmd.Wait()
+
+	assertSandboxGone(t, marker, 30*time.Second)
+}
+
+// TestIntegrationCgroupSandboxDiesWhenWrappedIsKilled checks that the cgroup lever
+// works, on a sandbox whose processes a SIGKILLed wrapped can no longer reach any
+// other way.
+func TestIntegrationCgroupSandboxDiesWhenWrappedIsKilled(t *testing.T) {
+	requireIntegration(t)
+	requireSystemdRun(t)
+	cmd, marker := startMarkedSandbox(t, "--cgroup")
+
+	require.NoError(t, cmd.Process.Signal(syscall.SIGKILL))
+	_ = cmd.Wait()
+
+	assertSandboxGone(t, marker, 30*time.Second)
+}
+
+// TestIntegrationPastaSandboxDiesWhenWrappedIsKilled checks that pasta, which sits
+// between wrapped and bwrap in bridge mode, is taken down along with the sandbox it
+// serves rather than left behind holding a network namespace.
+func TestIntegrationPastaSandboxDiesWhenWrappedIsKilled(t *testing.T) {
+	requireIntegration(t)
+	requirePasta(t)
+	cmd, marker := startMarkedSandbox(t, "--network", "bridge")
+
+	require.NoError(t, cmd.Process.Signal(syscall.SIGKILL))
+	_ = cmd.Wait()
+
+	assertSandboxGone(t, marker, 30*time.Second)
+}
+
+// startProcessGroup runs a shell that leaves a long sleep behind in a process group of
+// its own, and returns the group's id, the group leader's start time and the id of the
+// sleep. It is the smallest stand-in for a sandbox that needs neither bwrap nor
+// namespaces, so the termination machinery can be tested wherever the tests run.
+func startProcessGroup(t *testing.T) (pgid, startTime, sleeperPid int) {
+	t.Helper()
+	requireSignals(t)
+	shPath := requireTool(t, "sh")
+	requireTool(t, "sleep")
+
+	cmd := exec.Command(shPath, "-c", "sleep 3600 & echo $!; wait")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	require.NoError(t, err)
+	sleeperPid, err = strconv.Atoi(strings.TrimSpace(line))
+	require.NoError(t, err)
+
+	pgid = cmd.Process.Pid
+	startTime, err = processStartTime(pgid)
+	require.NoError(t, err)
+	return pgid, startTime, sleeperPid
+}
+
+// startTestReaper runs the reaper helper out of the test binary, which stands in for
+// the wrapped binary here, and returns the write end of its pipe. Closing that write
+// end is what wrapped's death looks like from the reaper's side.
+func startTestReaper(t *testing.T, pgid, startTime int) *os.File {
+	t.Helper()
+	readEnd, writeEnd, err := os.Pipe()
+	require.NoError(t, err)
+
+	self, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.Command(self, reapArg, strconv.Itoa(pgid), strconv.Itoa(startTime))
+	cmd.ExtraFiles = []*os.File{readEnd}
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start())
+	require.NoError(t, readEnd.Close())
+
+	t.Cleanup(func() {
+		_ = writeEnd.Close()
+		_ = cmd.Wait()
+	})
+	return writeEnd
+}
+
+// TestIntegrationReaperKillsProcessGroupOnEndOfFile checks that the reaper takes the
+// sandbox's process group down as soon as wrapped lets go of the pipe.
+func TestIntegrationReaperKillsProcessGroupOnEndOfFile(t *testing.T) {
+	requireIntegration(t)
+	pgid, startTime, sleeperPid := startProcessGroup(t)
+	pipe := startTestReaper(t, pgid, startTime)
+
+	// The reaper must wait for wrapped, not act on its own.
+	time.Sleep(200 * time.Millisecond)
+	assert.NoError(t, syscall.Kill(sleeperPid, 0), "the reaper must not act while wrapped is alive")
+
+	require.NoError(t, pipe.Close())
+	assertProcessGone(t, sleeperPid, 10*time.Second)
+}
+
+// TestIntegrationReaperSparesAReusedProcessGroupID checks that the reaper leaves a
+// process group alone when its leader is not the process wrapped started, which is
+// what a process id handed out again after the sandbox exited looks like.
+func TestIntegrationReaperSparesAReusedProcessGroupID(t *testing.T) {
+	requireIntegration(t)
+	pgid, startTime, sleeperPid := startProcessGroup(t)
+	pipe := startTestReaper(t, pgid, startTime+1)
+
+	require.NoError(t, pipe.Close())
+	time.Sleep(500 * time.Millisecond)
+	assert.NoError(t, syscall.Kill(sleeperPid, 0),
+		"a process group whose leader has been replaced is somebody else's")
+}
+
+// assertProcessGone waits for a process to stop running. A zombie counts as gone: the
+// process is dead, only the entry its parent has not yet collected is left.
+func assertProcessGone(t *testing.T, pid int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if os.IsNotExist(err) {
+			return
+		}
+		// Field 3, the state, is the first one after the name in parentheses.
+		if fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:])); len(fields) > 0 && fields[0] == "Z" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %d is still running", pid)
+}
+
+// TestIntegrationRunSandboxLeavesNothingBehind checks the supervisor itself, on a
+// stand-in sandbox that needs no namespaces: a program that exits while leaving a
+// child of its own running must not leave that child running.
+func TestIntegrationRunSandboxLeavesNothingBehind(t *testing.T) {
+	requireIntegration(t)
+	requireSignals(t)
+	shPath := requireTool(t, "sh")
+	requireTool(t, "sleep")
+
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	err := runSandbox(shPath, []string{"-c", fmt.Sprintf("sleep 3600 & echo $! > %s", pidFile)}, Cgroup{})
+	require.NoError(t, err)
+
+	content, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	orphan, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	require.NoError(t, err)
+
+	assertProcessGone(t, orphan, 10*time.Second)
+}
+
+// TestIntegrationRunSandboxUsesItsOwnProcessGroup checks that the sandbox is put in a
+// process group of its own, which is what lets wrapped signal all of it at once
+// without signalling whoever ran wrapped.
+func TestIntegrationRunSandboxUsesItsOwnProcessGroup(t *testing.T) {
+	requireIntegration(t)
+	shPath := requireTool(t, "sh")
+
+	statFile := filepath.Join(t.TempDir(), "stat")
+	err := runSandbox(shPath, []string{"-c", "cat /proc/self/stat > " + statFile}, Cgroup{})
+	require.NoError(t, err)
+
+	content, err := os.ReadFile(statFile)
+	require.NoError(t, err)
+	// Field 5 of /proc/<pid>/stat is the process group id; the fields are counted from
+	// the last closing parenthesis, since the name in field 2 may contain them.
+	fields := strings.Fields(string(content[bytes.LastIndexByte(content, ')')+1:]))
+	require.Greater(t, len(fields), 5-3)
+	pgid, err := strconv.Atoi(fields[5-3])
+	require.NoError(t, err)
+
+	assert.NotEqual(t, syscall.Getpgrp(), pgid, "the sandbox must not share wrapped's process group")
+}
+
+// TestIntegrationRunSandboxReportsExitCode checks that the sandboxed program's exit
+// code reaches wrapped's caller, which it used to by virtue of wrapped exec'ing the
+// sandbox and no longer does.
+func TestIntegrationRunSandboxReportsExitCode(t *testing.T) {
+	requireIntegration(t)
+	shPath := requireTool(t, "sh")
+
+	assert.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, Cgroup{}))
+
+	err := runSandbox(shPath, []string{"-c", "exit 3"}, Cgroup{})
+	var exitErr *ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 3, exitErr.Code)
+}
+
+// TestIntegrationRunSandboxDoesNotLeakGoroutines checks that a finished run leaves
+// nothing running inside wrapped either. Wrapped returns now rather than replacing the
+// process with the sandbox, so a caller that runs one sandbox after another would
+// accumulate the signal-forwarding goroutine and its channel once per run.
+func TestIntegrationRunSandboxDoesNotLeakGoroutines(t *testing.T) {
+	requireIntegration(t)
+	shPath := requireTool(t, "sh")
+
+	// A first run on its own, so that whatever the runtime and os/exec start along
+	// the way is already up and does not count as growth.
+	require.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, Cgroup{}))
+	before := runtime.NumGoroutine()
+
+	const runs = 5
+	for range runs {
+		require.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, Cgroup{}))
+	}
+
+	// os/exec may take a moment to finish with the reaper, so settle rather than
+	// measure straight away; a real leak never settles.
+	deadline := time.Now().Add(5 * time.Second)
+	after := runtime.NumGoroutine()
+	for after > before && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		after = runtime.NumGoroutine()
+	}
+	assert.LessOrEqual(t, after, before,
+		"%d runs left %d goroutines behind", runs, after-before)
+}
+
+// TestIntegrationRunSandboxReportsSignalledExit checks that a sandboxed program killed
+// by a signal — an out-of-memory kill, say — is reported as such rather than as a
+// nondescript failure.
+func TestIntegrationRunSandboxReportsSignalledExit(t *testing.T) {
+	requireIntegration(t)
+	requireSignals(t)
+	shPath := requireTool(t, "sh")
+
+	err := runSandbox(shPath, []string{"-c", "kill -KILL $$"}, Cgroup{})
+	var exitErr *ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 128+int(syscall.SIGKILL), exitErr.Code)
 }

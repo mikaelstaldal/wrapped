@@ -17,15 +17,17 @@ The project is implemented in **Go**:
 go build -trimpath -buildvcs=true -tags netgo -o wrapped ./cmd/wrapped
 golangci-lint run ./...
 go test ./...
+go test -short ./...   # unit tests only, no bwrap/pasta/systemd-run, no signals
 ```
 
 ## Architecture
 
 The Go implementation is structured as a library + CLI:
-- `wrapped.go` — `package wrapped` library exposing `Wrapped()`. Builds bwrap arguments, then either `syscall.Exec`s bwrap (default) or runs it as a child process (filtered/bridge network modes).
+- `wrapped.go` — `package wrapped` library exposing `Wrapped()`. Builds the bwrap arguments and hands the resulting command line to `runSandbox`, either directly (default) or wrapped in pasta (bridge/filtered network modes).
+- `supervise.go` — `runSandbox` and everything about starting the sandbox and taking it down again: the process group, the terminal handover, the reaper, and the two kill levers. See [Terminating the sandbox](#terminating-the-sandbox).
 - `cmd/wrapped/main.go` — `package main` CLI using `cobra` for argument parsing. Calls `wrapped.Wrapped()`.
 
-Key design: the tool constructs a `bwrap` command line with namespace isolation flags (`--unshare-user`, `--unshare-ipc`, `--unshare-pid`, etc.), then execs into it. The sandbox provides:
+Key design: the tool constructs a `bwrap` command line with namespace isolation flags (`--unshare-user`, `--unshare-ipc`, `--unshare-pid`, etc.), then runs it. The sandbox provides:
 - Read-only bind mounts of `/usr`, `/etc`
 - Symlinks for `/lib`, `/lib64`, `/bin`, `/sbin`
 - Cleared environment with selective passthrough
@@ -41,7 +43,9 @@ Key design: the tool constructs a `bwrap` command line with namespace isolation 
 
 ### Cgroups and resource limits
 
-`--cgroup` (implied by `--cpu-limit` and `--memory-limit`) runs the sandbox in a transient systemd scope, i.e. a cgroup of its own. `buildCgroupPrefix` in `wrapped.go` turns a `Cgroup` value into a `systemd-run --user --scope --quiet --collect [--property ...] --` prefix that is placed in front of the command wrapped would otherwise have run — `bwrap` in the default mode, `pasta` in the bridge and filtered modes, so that pasta shares the sandbox's limits. `systemd-run --scope` execs its command once the scope exists, so the default mode still `syscall.Exec`s and keeps its PID.
+`--cgroup` (implied by `--cpu-limit` and `--memory-limit`) runs the sandbox in a transient systemd scope, i.e. a cgroup of its own. `buildCgroupPrefix` in `wrapped.go` turns a `Cgroup` value into a `systemd-run --user --scope --quiet --collect [--property ...] --` prefix that is placed in front of the command wrapped would otherwise have run — `bwrap` in the default mode, `pasta` in the bridge and filtered modes, so that pasta shares the sandbox's limits. `systemd-run --scope` execs its command once the scope exists, so the scope is in place before the sandbox starts.
+
+wrapped passes `--unit` so that it knows the scope's name in advance; that is how `waitForScopeCgroup` recognises the sandbox's cgroup in `/proc/<pid>/cgroup` afterwards, which is what makes `cgroup.kill` addressable. Do not drop it.
 
 `CPUAccounting=yes` and `MemoryAccounting=yes` are always passed, so that a cgroup created without limits still measures what the program uses instead of depending on the distribution's `DefaultCPUAccounting`/`DefaultMemoryAccounting`. The two are not symmetric, and the difference has already produced one wrong test: systemd enables a controller for a unit only if the unit needs it, so `MemoryAccounting` enables the `memory` controller (giving `memory.current` and `memory.max`), while `CPUAccounting` does **not** enable the `cpu` controller, because cgroup v2 reports CPU usage in `cpu.stat` regardless. `cpu.max` therefore exists only once `--cpu-limit` is set, and its absence means unlimited.
 
@@ -57,7 +61,24 @@ The CLI flags are deliberately backend-agnostic: `--cpu-limit` is a number of CP
 
 The nft rules must be applied inside pasta's namespace but before bwrap, so that `nft` gets `CAP_NET_ADMIN` from pasta's user namespace rather than bwrap's. pasta's command mode runs a single command, so wrapped runs itself as that command: `pasta ... -- wrapped __nft-exec <ruleset> <bwrap> <bwrap args...>`. The `__nft-exec` helper (`RunInternalCommand` in `wrapped.go`, dispatched at the top of `main`) pipes the ruleset to `nft` and, **only if that succeeds**, execs bwrap — so a failure to apply the rules never falls open to an unfiltered network.
 
-The ruleset and the bwrap arguments travel as ordinary argv elements, so no shell and no quoting is involved. Do not reintroduce `sh -c` here. Note that this makes `--network filtered` depend on `os.Executable()`: a program embedding this package must call `wrapped.RunInternalCommand(os.Args[1:])` before parsing its own arguments.
+The ruleset and the bwrap arguments travel as ordinary argv elements, so no shell and no quoting is involved. Do not reintroduce `sh -c` here.
+
+`RunInternalCommand` dispatches a second helper, `__reap`, described below. Between them they make **every** run depend on `os.Executable()`, not just `--network filtered`: a program embedding this package must call `wrapped.RunInternalCommand(os.Args[1:])` before parsing its own arguments.
+
+### Terminating the sandbox
+
+wrapped must leave nothing behind — not the program, not its subprocesses, not either bwrap process, not pasta — and must manage it when a process crashes or is killed outright. bwrap's `--die-with-parent` is deliberately not used; it is unreliable. `supervise.go` holds all of this.
+
+`runSandbox` forks the sandbox chain with `Setpgid`, so the sandbox is a process group of its own, and waits for it with `syscall.Wait4`. Cleanup has two levers:
+
+- **`cgroup.kill`** on the transient scope, when `--cgroup` is in effect. The kernel applies it to every process in the cgroup at once, regardless of parent, process group or session, so it survives a program that daemonises and a process orphaned by a `SIGKILL` further up the chain. `killCgroup` falls back to signalling `cgroup.procs` by hand on kernels before 5.14, where `cgroup.kill` does not exist. This is the reliable lever.
+- **`SIGKILL` to the process group**, which is all there is without a cgroup, and which `setsid` escapes. Best-effort by construction.
+
+Neither lever works if wrapped is itself killed with `SIGKILL`, so `startReaper` re-execs wrapped as `__reap <pgid> <starttime>` with the read end of a pipe on descriptor 3 and the write end held only by wrapped. The reaper blocks reading that pipe; end-of-file means wrapped is gone, however it went, and the reaper then pulls both levers. wrapped sends the cgroup path down the pipe once `waitForScopeCgroup` has resolved it, since the scope does not exist until systemd-run has created it. The reaper is started **after** the sandbox, so that nothing in the sandbox can inherit the write end and hold the pipe open; it runs `Setsid` so signals aimed at wrapped's own process group cannot take it out.
+
+`killProcessGroup` checks the leader's start time from `/proc/<pid>/stat` field 22 before signalling, so a process id handed out again after the sandbox exited is not signalled by mistake.
+
+A process group of its own would make the sandbox a background job, stopped by `SIGTTIN` the moment it read from the terminal, so `terminalHandover` makes it the foreground group instead, and `waitForSandbox` waits with `WUNTRACED` so that a `Ctrl-Z` of the sandbox suspends wrapped along with it and job control keeps working. `SIGTTIN`/`SIGTTOU` are ignored only **after** the fork, since an ignored signal stays ignored across `exec` and the sandbox must not inherit that.
 
 ### Documentation
 
@@ -66,3 +87,10 @@ Keep the documentation in `README.md` up-to-date with command line options etc.
 ### Testing
 
 Use [testify](https://github.com/stretchr/testify) (`assert` and `require` packages) for all Go tests.
+
+The two test files are not interchangeable, and a test in the wrong one is a real problem rather than an untidiness:
+
+- `wrapped_test.go` holds unit tests. They must not exec anything, send a signal, or touch a real cgroup. `go test -short ./...` runs these alone, which is what a machine whose AppArmor profile confines the test runner needs — a denied `bwrap` there is not a wrapped bug and must not be reported as one.
+- `wrapped_integration_test.go` holds everything that runs real programs or signals real processes. Every test in it is named `TestIntegration...` and **must** call `requireIntegration(t)` first, plus the `require*` helper for whatever it needs, so it skips rather than fails where that thing is unavailable.
+
+Take particular care with tests around process termination. A test that feeds a made-up process id to something that ends in `kill(2)` can take the whole session down: `kill` reads 0 as the caller's own process group and **-1 as every process the caller can signal**. `cgroupProcs` drops anything that is not a positive process id for exactly this reason, and `TestCgroupProcsRejectsAnythingButAProcessID` guards it. Test the parsing and the walking; do not test the killing with values you invented.

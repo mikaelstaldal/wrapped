@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -116,11 +115,11 @@ func systemdUserBusEnvAt(env []string, standardRuntimeDir string) ([]string, err
 }
 
 // buildCgroupPrefix returns the command prefix that runs the sandbox in a transient
-// systemd scope, that is, in a cgroup of its own, with the requested limits applied,
-// together with the environment the sandbox must run with. The first element of the
-// prefix is the absolute path of systemd-run and doubles as argv[0]. The prefix is nil
-// if no cgroup was requested; the environment is always the one to use.
-func buildCgroupPrefix(cgroup Cgroup, env []string) ([]string, []string, error) {
+// systemd scope named unit, that is, in a cgroup of its own, with the requested limits
+// applied, together with the environment the sandbox must run with. The first element
+// of the prefix is the absolute path of systemd-run and doubles as argv[0]. The prefix
+// is nil if no cgroup was requested; the environment is always the one to use.
+func buildCgroupPrefix(cgroup Cgroup, env []string, unit string) ([]string, []string, error) {
 	if !cgroup.Enabled {
 		return nil, env, nil
 	}
@@ -152,6 +151,12 @@ func buildCgroupPrefix(cgroup Cgroup, env []string) ([]string, []string, error) 
 		"--description", "wrapped sandbox",
 		"--property", "CPUAccounting=yes",
 		"--property", "MemoryAccounting=yes",
+	}
+
+	// Naming the scope is what lets wrapped recognise the sandbox's cgroup in /proc
+	// afterwards, and so address the whole sandbox at once when tearing it down.
+	if unit != "" {
+		args = append(args, "--unit", unit)
 	}
 
 	if cgroup.CPULimit != "" {
@@ -279,22 +284,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
-	cgroupPrefix, env, err := buildCgroupPrefix(cgroup, os.Environ())
-	if err != nil {
-		return err
-	}
-	if len(cgroupPrefix) > 0 {
-		// systemd-run --scope execs the command once the scope exists, so the exec
-		// chain is preserved and the sandbox keeps this process's PID.
-		argv := append(append([]string{}, cgroupPrefix...), bwrapPath)
-		argv = append(argv, bwrapArgs...)
-		// exec replaces the current process; if we reach the return, exec failed.
-		return fmt.Errorf("failed to exec systemd-run: %w", syscall.Exec(cgroupPrefix[0], argv, env))
-	}
-
-	argv := append([]string{"bwrap"}, bwrapArgs...)
-	// exec replaces the current process; if we reach the return, exec failed.
-	return fmt.Errorf("failed to exec bwrap: %w", syscall.Exec(bwrapPath, argv, env))
+	return runSandbox(bwrapPath, bwrapArgs, cgroup)
 }
 
 func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
@@ -389,18 +379,25 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 const internalNftExecArg = "__nft-exec"
 
 // RunInternalCommand handles wrapped's internal helper invocations, in which wrapped
-// re-execs itself to perform setup that must happen inside pasta's namespace. It
-// reports whether args were such an invocation; if so, the caller must not proceed
-// with normal argument parsing.
+// re-execs itself: to perform setup that must happen inside pasta's namespace, and to
+// leave behind the reaper that terminates the sandbox if wrapped is killed. It reports
+// whether args were such an invocation; if so, the caller must not proceed with normal
+// argument parsing.
 //
 // A program embedding this package must call RunInternalCommand with os.Args[1:]
-// before parsing its own arguments, since --network filtered re-execs the running
-// binary (as reported by os.Executable) to reach the helper.
+// before parsing its own arguments, since every run re-execs the running binary (as
+// reported by os.Executable) to reach one of these helpers.
 func RunInternalCommand(args []string) (handled bool, err error) {
-	if len(args) == 0 || args[0] != internalNftExecArg {
+	if len(args) == 0 {
 		return false, nil
 	}
-	return true, runNftExec(args[1:])
+	switch args[0] {
+	case internalNftExecArg:
+		return true, runNftExec(args[1:])
+	case reapArg:
+		return true, runReap(args[1:])
+	}
+	return false, nil
 }
 
 // runNftExec applies an nftables ruleset and, only if that succeeds, execs the given
@@ -695,7 +692,8 @@ func buildPastaArgs(name string, args []string, exposeTCP, exposeUDP []string) (
 // namespace and runs the given command as its child. This avoids the --info-fd/--userns-block-fd
 // coordination protocol that causes ECHILD errors with --unshare-pid.
 // If a cgroup is requested, pasta is started inside it, so that the sandbox and the
-// network stack serving it share the same limits.
+// network stack serving it share the same limits — and so that taking the cgroup down
+// takes pasta down with the sandbox it serves.
 func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string, cgroup Cgroup) error {
 	pastaArgs, err := buildPastaArgs(name, args, exposeTCP, exposeUDP)
 	if err != nil {
@@ -707,46 +705,7 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string, 
 		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
 	}
 
-	cgroupPrefix, env, err := buildCgroupPrefix(cgroup, os.Environ())
-	if err != nil {
-		return err
-	}
-	cmdPath, cmdArgs := pastaPath, pastaArgs
-	if len(cgroupPrefix) > 0 {
-		cmdPath = cgroupPrefix[0]
-		cmdArgs = append(append(append([]string{}, cgroupPrefix[1:]...), pastaPath), pastaArgs...)
-	}
-
-	cmd := exec.Command(cmdPath, cmdArgs...)
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start %s: %w", filepath.Base(cmdPath), err)
-	}
-
-	// Forward signals to the child.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	go func() {
-		for sig := range sigCh {
-			_ = cmd.Process.Signal(sig)
-		}
-	}()
-
-	err = cmd.Wait()
-	signal.Stop(sigCh)
-
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return &ExitError{Code: exitErr.ExitCode()}
-		}
-		return fmt.Errorf("%s failed: %w", filepath.Base(cmdPath), err)
-	}
-	return nil
+	return runSandbox(pastaPath, pastaArgs, cgroup)
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,

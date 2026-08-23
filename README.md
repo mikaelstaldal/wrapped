@@ -117,6 +117,29 @@ counts towards the limits too.
 `--cgroup` is independent of `--unshare-cgroup`; combine them to also hide the cgroup
 path from the sandboxed program, which then sees its own cgroup as the root.
 
+### Lifetime of the sandbox
+
+Nothing survives wrapped: when wrapped exits, the sandboxed program, everything it
+started, both `bwrap` processes and, in bridge and filtered mode, `pasta` are
+terminated. This holds when the program exits normally, when wrapped is interrupted or
+terminated, and when wrapped is killed outright with `SIGKILL` or by the OOM killer —
+in that last case a reaper process, which wrapped leaves running beside the sandbox for
+exactly this purpose, does it instead.
+
+wrapped runs the sandbox in a process group of its own and takes that group down with
+`SIGKILL`. With `--cgroup` (or either limit flag) it also kills the transient scope's
+cgroup, which is the stronger of the two: the kernel applies it to every process in the
+cgroup at once, whatever its parent, process group or session. Without a cgroup, a
+program that calls `setsid` and a process orphaned by one of the processes above it
+being killed can escape; with one, they cannot. Use `--cgroup` when the program must
+not be able to leave anything behind.
+
+The sandbox is the terminal's foreground process group while it runs, so `Ctrl-C`,
+`Ctrl-\` and `Ctrl-Z` reach the program directly. wrapped suspends and resumes along
+with it, so job control works as it would without wrapped in between. A program killed
+by a signal makes wrapped exit with 128 plus the signal number, as a shell would
+report it, so an out-of-memory kill under `--memory-limit` shows up as exit code 137.
+
 ### Confining wrapped with AppArmor
 
 This is about confining the `wrapped` binary itself, and is unrelated to the
@@ -136,9 +159,29 @@ put local additions in `/etc/apparmor.d/local/wrapped` rather than in the profil
 The profile is deliberately small, because wrapped opens very little: it execs `bwrap`,
 `pasta`, `nft` and `systemd-run`, and those need privileges the profile itself must not
 carry. Resolving the paths on the command line needs no rules, since wrapped only
-`lstat`s and `readlink`s them.
+`lstat`s and `readlink`s them. It also execs itself as the reaper described in
+[Lifetime of the sandbox](#lifetime-of-the-sandbox), which is what the `@{wrapped_path}
+ix,` rule is for.
 
-One rule is worth understanding before you write your own profile:
+Two rules are worth understanding before you write your own profile.
+
+```
+  ptrace (read),
+```
+
+wrapped reads `/proc/<pid>/stat` and `/proc/<pid>/cgroup` of the sandbox it started, to
+identify its process group and find its cgroup. Reading another process's entries under
+`/proc` is mediated as ptrace `read` when that process runs under a different profile,
+so a `@{PROC}/** r,` rule alone is not enough and the denial is reported against the
+peer rather than against `/proc`:
+
+```
+apparmor="DENIED" operation="ptrace" profile="wrapped" comm="wrapped" \
+  requested_mask="read" peer="unconfined"
+```
+
+The peer is `unconfined` for a `bwrap` with no profile of its own, and `pasta` with
+`--network bridge` or `--network filtered`.
 
 ```
   /usr/bin/systemd-run pux,

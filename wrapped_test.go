@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -557,7 +559,7 @@ func TestSystemdUserBusEnvMissingBus(t *testing.T) {
 }
 
 func TestBuildCgroupPrefixDisabled(t *testing.T) {
-	prefix, env, err := buildCgroupPrefix(Cgroup{}, []string{"FOO=bar"})
+	prefix, env, err := buildCgroupPrefix(Cgroup{}, []string{"FOO=bar"}, "")
 	require.NoError(t, err)
 	assert.Empty(t, prefix)
 	// Without a cgroup the environment must pass through untouched, and no session
@@ -571,11 +573,14 @@ func TestBuildCgroupPrefix(t *testing.T) {
 	}
 	withSessionBus(t)
 
-	prefix, _, err := buildCgroupPrefix(Cgroup{Enabled: true}, nil)
+	prefix, _, err := buildCgroupPrefix(Cgroup{Enabled: true}, nil, "wrapped-test.scope")
 	require.NoError(t, err)
 	require.NotEmpty(t, prefix)
 	assert.Equal(t, "systemd-run", filepath.Base(prefix[0]))
 	assert.True(t, containsSeq(prefix, "--user", "--scope"))
+	// The scope has to carry the name wrapped picked, since that is how it recognises
+	// the sandbox's cgroup afterwards and so can terminate the sandbox as a whole.
+	assert.True(t, containsSeq(prefix, "--unit", "wrapped-test.scope"))
 	// The prefix must end with the separator, so the sandbox command follows it.
 	assert.Equal(t, "--", prefix[len(prefix)-1])
 	// Accounting is always requested, so that a cgroup without limits still gets
@@ -588,7 +593,7 @@ func TestBuildCgroupPrefix(t *testing.T) {
 		assert.NotContains(t, arg, "MemoryMax=")
 	}
 
-	prefix, _, err = buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "1.5", MemoryLimit: "512m"}, nil)
+	prefix, _, err = buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "1.5", MemoryLimit: "512m"}, nil, "")
 	require.NoError(t, err)
 	assert.True(t, containsSeq(prefix, "--property", "CPUQuota=150%"))
 	assert.True(t, containsSeq(prefix, "--property", "MemoryMax=512M"))
@@ -601,9 +606,97 @@ func TestBuildCgroupPrefixInvalidLimits(t *testing.T) {
 	}
 	withSessionBus(t)
 
-	_, _, err := buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "half"}, nil)
+	_, _, err := buildCgroupPrefix(Cgroup{Enabled: true, CPULimit: "half"}, nil, "")
 	assert.ErrorContains(t, err, "invalid CPU limit")
 
-	_, _, err = buildCgroupPrefix(Cgroup{Enabled: true, MemoryLimit: "512MB"}, nil)
+	_, _, err = buildCgroupPrefix(Cgroup{Enabled: true, MemoryLimit: "512MB"}, nil, "")
 	assert.ErrorContains(t, err, "invalid memory limit")
+}
+
+func TestScopeUnitName(t *testing.T) {
+	name := scopeUnitName()
+	assert.True(t, strings.HasPrefix(name, "wrapped-"), "unexpected unit name %q", name)
+	assert.True(t, strings.HasSuffix(name, ".scope"), "unexpected unit name %q", name)
+	// systemd refuses a name that is already taken, so two runs must never agree.
+	assert.NotEqual(t, name, scopeUnitName())
+}
+
+func TestProcessStartTime(t *testing.T) {
+	own, err := processStartTime(os.Getpid())
+	require.NoError(t, err)
+	assert.Positive(t, own, "a process started after boot has a positive start time")
+
+	// The same process must keep reporting the same start time, since that is what
+	// tells it apart from a later process reusing its process id.
+	again, err := processStartTime(os.Getpid())
+	require.NoError(t, err)
+	assert.Equal(t, own, again)
+
+	_, err = processStartTime(-1)
+	assert.Error(t, err, "there is no process -1")
+}
+
+// TestProcessStartTimeParsesNamesWithSpacesAndParentheses guards the parsing of the
+// one field of /proc/<pid>/stat that cannot be split on whitespace.
+func TestProcessStartTimeParsesNamesWithSpacesAndParentheses(t *testing.T) {
+	// Fields 3 onwards of a real stat line, with a name that would break a naive
+	// split, and 22 as the start time.
+	fields := make([]string, 0, 20)
+	for i := 3; i <= 22; i++ {
+		fields = append(fields, strconv.Itoa(i))
+	}
+	line := "1234 (od (d) name) " + strings.Join(fields, " ") + "\n"
+
+	dir := t.TempDir()
+	statPath := filepath.Join(dir, "stat")
+	require.NoError(t, os.WriteFile(statPath, []byte(line), 0o644))
+
+	// processStartTime reads /proc directly, so exercise the parsing it does on the
+	// contents rather than the path it reads them from.
+	content, err := os.ReadFile(statPath)
+	require.NoError(t, err)
+	parsed := strings.Fields(string(content[strings.LastIndex(string(content), ")")+1:]))
+	require.Greater(t, len(parsed), 22-3)
+	assert.Equal(t, "22", parsed[22-3], "field 22 is the start time")
+}
+
+func TestProcessCgroup(t *testing.T) {
+	path, err := processCgroup(os.Getpid())
+	if err != nil {
+		t.Skipf("no cgroup v2 entry for this process: %v", err)
+	}
+	assert.True(t, strings.HasPrefix(path, "/"), "expected an absolute cgroup path, got %q", path)
+
+	_, err = processCgroup(-1)
+	assert.Error(t, err, "there is no process -1")
+}
+
+// TestKillCgroupIgnoresAMissingCgroup checks that a cgroup systemd has already
+// collected is not an error: there was nothing left in it to kill.
+func TestKillCgroupIgnoresAMissingCgroup(t *testing.T) {
+	assert.NotPanics(t, func() { killCgroup(filepath.Join(t.TempDir(), "gone.scope")) })
+}
+
+// TestCgroupProcsWalksTheSubtree checks that the fallback for kernels without
+// cgroup.kill looks at the nested cgroups too, since the sandbox may have made some.
+func TestCgroupProcsWalksTheSubtree(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("101\n102\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "cgroup.procs"), []byte("103\n"), 0o644))
+
+	assert.ElementsMatch(t, []int{101, 102, 103}, cgroupProcs(dir))
+}
+
+// TestCgroupProcsRejectsAnythingButAProcessID guards the one mistake in this file that
+// is catastrophic rather than merely wrong: kill(2) reads 0 as the caller's own process
+// group and -1 as every process the caller can signal, so an entry that is not a real
+// process id must be dropped before it can be signalled.
+func TestCgroupProcsRejectsAnythingButAProcessID(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.procs"),
+		[]byte("-1\n0\n-2\nnot-a-pid\n\n7\n"), 0o644))
+
+	assert.Equal(t, []int{7}, cgroupProcs(dir))
 }

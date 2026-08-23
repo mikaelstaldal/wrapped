@@ -18,8 +18,9 @@ import (
 var version string
 
 func main() {
-	// wrapped re-execs itself for internal helper work; handle that before
-	// interpreting the arguments as a normal sandbox invocation.
+	// wrapped re-execs itself for internal helper work — applying the nftables rules
+	// inside pasta's namespace, and reaping the sandbox if wrapped is killed — so
+	// handle that before interpreting the arguments as a normal sandbox invocation.
 	if handled, err := wrapped.RunInternalCommand(os.Args[1:]); handled {
 		if err != nil {
 			log.Fatal(err)
