@@ -1054,7 +1054,7 @@ func TestIntegrationRunSandboxLeavesNothingBehind(t *testing.T) {
 	requireTool(t, "sleep")
 
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	err := runSandbox(shPath, []string{"-c", fmt.Sprintf("sleep 3600 & echo $! > %s", pidFile)}, Cgroup{})
+	err := runSandbox(shPath, []string{"-c", fmt.Sprintf("sleep 3600 & echo $! > %s", pidFile)}, sandboxChainEnv(false), Cgroup{})
 	require.NoError(t, err)
 
 	content, err := os.ReadFile(pidFile)
@@ -1065,6 +1065,52 @@ func TestIntegrationRunSandboxLeavesNothingBehind(t *testing.T) {
 	assertProcessGone(t, orphan, 10*time.Second)
 }
 
+// TestIntegrationAllEnvReachesTheProgram checks the one wiring a minimal chain
+// environment could quietly break, end to end through the CLI: with --all-env bwrap is
+// given no --clearenv, so the program's environment is bwrap's own, and bwrap has to
+// have been handed wrapped's.
+func TestIntegrationAllEnvReachesTheProgram(t *testing.T) {
+	requireIntegration(t)
+	requireBwrap(t)
+	bin := buildWrappedBinary(t)
+	shPath := requireTool(t, "sh")
+
+	cmd := exec.Command(bin, "--all-env", "--", shPath, "-c", "echo $WRAPPED_TEST_SECRET")
+	cmd.Env = append(os.Environ(), "WRAPPED_TEST_SECRET=through-the-chain")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "stderr: %s", stderr.String())
+	assert.Equal(t, "through-the-chain", strings.TrimSpace(stdout.String()))
+}
+
+// TestIntegrationRunSandboxEnvironment checks what the sandbox chain is really run
+// with, on a stand-in sandbox that reports its own environment where bwrap would be.
+// Only a run that passes the environment through to the program — --all-env,
+// --only-network — has any business carrying it down the chain.
+func TestIntegrationRunSandboxEnvironment(t *testing.T) {
+	requireIntegration(t)
+	shPath := requireTool(t, "sh")
+	requireTool(t, "env")
+
+	t.Setenv("WRAPPED_TEST_SECRET", "not-for-the-chain")
+	envFile := filepath.Join(t.TempDir(), "env")
+	report := []string{"-c", "env > " + envFile}
+
+	require.NoError(t, runSandbox(shPath, report, sandboxChainEnv(false), Cgroup{}))
+	content, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(content), "WRAPPED_TEST_SECRET",
+		"the operator's environment must not reach the sandbox chain")
+	assert.Contains(t, string(content), "PATH=", "the chain still needs a PATH")
+
+	require.NoError(t, runSandbox(shPath, report, sandboxChainEnv(true), Cgroup{}))
+	content, err = os.ReadFile(envFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "WRAPPED_TEST_SECRET=not-for-the-chain",
+		"a run that passes the environment through must carry it down the chain")
+}
+
 // TestIntegrationRunSandboxUsesItsOwnProcessGroup checks that the sandbox is put in a
 // process group of its own, which is what lets wrapped signal all of it at once
 // without signalling whoever ran wrapped.
@@ -1073,7 +1119,7 @@ func TestIntegrationRunSandboxUsesItsOwnProcessGroup(t *testing.T) {
 	shPath := requireTool(t, "sh")
 
 	statFile := filepath.Join(t.TempDir(), "stat")
-	err := runSandbox(shPath, []string{"-c", "cat /proc/self/stat > " + statFile}, Cgroup{})
+	err := runSandbox(shPath, []string{"-c", "cat /proc/self/stat > " + statFile}, sandboxChainEnv(false), Cgroup{})
 	require.NoError(t, err)
 
 	content, err := os.ReadFile(statFile)
@@ -1095,9 +1141,9 @@ func TestIntegrationRunSandboxReportsExitCode(t *testing.T) {
 	requireIntegration(t)
 	shPath := requireTool(t, "sh")
 
-	assert.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, Cgroup{}))
+	assert.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, sandboxChainEnv(false), Cgroup{}))
 
-	err := runSandbox(shPath, []string{"-c", "exit 3"}, Cgroup{})
+	err := runSandbox(shPath, []string{"-c", "exit 3"}, sandboxChainEnv(false), Cgroup{})
 	var exitErr *ExitError
 	require.ErrorAs(t, err, &exitErr)
 	assert.Equal(t, 3, exitErr.Code)
@@ -1113,12 +1159,12 @@ func TestIntegrationRunSandboxDoesNotLeakGoroutines(t *testing.T) {
 
 	// A first run on its own, so that whatever the runtime and os/exec start along
 	// the way is already up and does not count as growth.
-	require.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, Cgroup{}))
+	require.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, sandboxChainEnv(false), Cgroup{}))
 	before := runtime.NumGoroutine()
 
 	const runs = 5
 	for range runs {
-		require.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, Cgroup{}))
+		require.NoError(t, runSandbox(shPath, []string{"-c", "exit 0"}, sandboxChainEnv(false), Cgroup{}))
 	}
 
 	// os/exec may take a moment to finish with the reaper, so settle rather than
@@ -1141,7 +1187,7 @@ func TestIntegrationRunSandboxReportsSignalledExit(t *testing.T) {
 	requireSignals(t)
 	shPath := requireTool(t, "sh")
 
-	err := runSandbox(shPath, []string{"-c", "kill -KILL $$"}, Cgroup{})
+	err := runSandbox(shPath, []string{"-c", "kill -KILL $$"}, sandboxChainEnv(false), Cgroup{})
 	var exitErr *ExitError
 	require.ErrorAs(t, err, &exitErr)
 	assert.Equal(t, 128+int(syscall.SIGKILL), exitErr.Code)

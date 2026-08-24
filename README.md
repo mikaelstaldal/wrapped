@@ -223,6 +223,13 @@ create a cgroup and runs the program without one.
 By default, PATH is reset to a standard value `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. 
 Use `--all-env` or `--env PATH` to keep the host PATH, or `--env PATH=...` to set a custom one.
 
+The helper processes wrapped runs — `systemd-run`, `pasta`, `bwrap` — are given an
+environment of their own rather than yours: `PATH`, and the two variables
+(`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`) that point `systemd-run` at the systemd
+user session bus. A secret in your environment stays out of theirs, and so out of what a
+core dump or a reader of `/proc` can pick up from them. `--all-env` and `--only-network`
+pass your environment on to the program, and there the helpers do carry it.
+
 ### Examples
 
 Run a program with no network and no access to the filesystem (beyond read-only access to system directories like `/usr` and `/etc`):

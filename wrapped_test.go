@@ -278,6 +278,59 @@ func TestBuildBaseBwrapArgsClearEnv(t *testing.T) {
 	assert.False(t, containsSeq(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
 }
 
+// TestSandboxChainEnvIsMinimal checks what the processes of the sandbox chain are run
+// with. The sandboxed program's environment is built from bwrap's --setenv arguments,
+// so nothing in the chain has any use for the environment wrapped was run with, and a
+// secret that never reaches bwrap cannot leak from its /proc entry or its core dump.
+func TestSandboxChainEnvIsMinimal(t *testing.T) {
+	t.Setenv("PATH", "/host/bin")
+	t.Setenv("WRAPPED_TEST_SECRET", "hunter2")
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	env := sandboxChainEnv(false)
+
+	assert.Contains(t, env, "PATH=/host/bin",
+		"the chain needs a PATH: the nft helper looks nft up in it")
+	// systemd-run --user finds the session bus through these two, and systemdUserBusEnv
+	// decides whether it can from wrapped's own environment rather than from this one.
+	assert.Contains(t, env, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus")
+	assert.Contains(t, env, "XDG_RUNTIME_DIR=/run/user/1000")
+	assert.NotContains(t, env, "WRAPPED_TEST_SECRET=hunter2",
+		"nothing in the chain looks this up, so nothing in the chain is to be given it")
+}
+
+// TestSandboxChainEnvFallsBackToDefaultPath checks that the chain gets a usable PATH
+// even where wrapped was run without one, since a lookup in an empty PATH resolves
+// against the current directory. A PATH set to nothing is no more use than no PATH at
+// all, so both come out the same way.
+func TestSandboxChainEnvFallsBackToDefaultPath(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		// t.Setenv registers the restore; Unsetenv then removes the variable itself.
+		t.Setenv("PATH", "")
+		require.NoError(t, os.Unsetenv("PATH"))
+
+		assert.Contains(t, sandboxChainEnv(false), "PATH="+defaultPath)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Setenv("PATH", "")
+
+		assert.Contains(t, sandboxChainEnv(false), "PATH="+defaultPath)
+		assert.NotContains(t, sandboxChainEnv(false), "PATH=")
+	})
+}
+
+// TestSandboxChainEnvInherits checks the exception: a run whose bwrap is not given
+// --clearenv passes its own environment on to the program, so the whole environment
+// has to travel down the chain. --all-env and --only-network are those runs.
+func TestSandboxChainEnvInherits(t *testing.T) {
+	t.Setenv("WRAPPED_TEST_SECRET", "hunter2")
+
+	assert.Equal(t, os.Environ(), sandboxChainEnv(true))
+	assert.Contains(t, sandboxChainEnv(true), "WRAPPED_TEST_SECRET=hunter2")
+}
+
 func TestBuildBaseBwrapArgsExtraEnv(t *testing.T) {
 	prog := testProgram(t)
 

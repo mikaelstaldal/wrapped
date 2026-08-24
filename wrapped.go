@@ -324,6 +324,57 @@ var envPassthrough = []string{
 	"USER",
 }
 
+// defaultPath is the PATH a sandboxed program is given when the run does not bring
+// one of its own, and the PATH the sandbox chain falls back on when wrapped was run
+// with none at all.
+const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// chainEnvPassthrough are the variables the sandbox chain is given from the
+// environment wrapped itself was run with, on top of PATH.
+//
+// Both are how systemd-run --user finds the session bus, and dropping either would be
+// worse than it looks: systemdUserBusEnv reasons about wrapped's own environment, so
+// it would find the bus reachable and still hand systemd-run an environment in which
+// it is not.
+var chainEnvPassthrough = []string{
+	"DBUS_SESSION_BUS_ADDRESS",
+	"XDG_RUNTIME_DIR",
+}
+
+// sandboxChainEnv returns the environment to run the sandbox chain with — systemd-run,
+// pasta, bwrap, and wrapped's own internal helpers in between.
+//
+// The sandboxed program's environment is assembled from bwrap's --setenv arguments, so
+// the processes in the chain have no use for the environment wrapped was run with, and
+// are not given it. An operator's environment holds secrets, and a secret that reaches
+// no further than wrapped cannot leak from a helper's /proc/<pid>/environ or its core
+// dump.
+//
+// inheritEnv turns this off, and must be set for exactly those runs where bwrap is not
+// given --clearenv and so passes its own environment on to the program: --all-env and
+// --only-network. Passing the environment through is the point of both.
+func sandboxChainEnv(inheritEnv bool) []string {
+	if inheritEnv {
+		return os.Environ()
+	}
+	// PATH is not a nicety here: the internal nft helper looks nft up in it, and bwrap
+	// and pasta look up the command they are told to run. An empty PATH is no more use
+	// than none at all — a lookup in it searches the current directory — so the two are
+	// the same thing here. An intentionally empty PATH still reaches a program that
+	// asked for the environment to be passed through, which returns above.
+	path := os.Getenv("PATH")
+	if path == "" {
+		path = defaultPath
+	}
+	env := []string{"PATH=" + path}
+	for _, k := range chainEnvPassthrough {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
+}
+
 // Network mode constants for the networkMode parameter.
 const (
 	NetworkNone     = "none"
@@ -405,7 +456,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
-	return runSandbox(bwrapPath, bwrapArgs, cgroup)
+	return runSandbox(bwrapPath, bwrapArgs, sandboxChainEnv(allEnv), cgroup)
 }
 
 func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
@@ -492,7 +543,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 	}
 
 	helperArgs := append([]string{internalNftExecArg, nftScript, bwrapPath}, bwrapArgs...)
-	return runPastaCommand(self, helperArgs, nil, nil, cgroup)
+	return runPastaCommand(self, helperArgs, nil, nil, sandboxChainEnv(allEnv || networkSandboxOnly), cgroup)
 }
 
 // internalNftExecArg marks an invocation of wrapped as the internal nft helper
@@ -542,6 +593,10 @@ func runNftExec(args []string) error {
 		return fmt.Errorf("failed to apply nftables rules: %w", err)
 	}
 
+	// bwrap is exec'd with this helper's own environment, which is the one
+	// sandboxChainEnv built for the chain and pasta passed down: minimal for an
+	// ordinary run, and the operator's own where the run is to pass it through.
+	//
 	// exec replaces the current process; if we reach the return, exec failed.
 	return fmt.Errorf("failed to exec %s: %w", argv[0], syscall.Exec(argv[0], argv, os.Environ()))
 }
@@ -742,7 +797,7 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
-	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, cgroup)
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, sandboxChainEnv(allEnv), cgroup)
 }
 
 func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string, exposeTCP, exposeUDP []string, cgroup Cgroup) error {
@@ -770,7 +825,7 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 	args = append(args, program)
 	args = append(args, arguments...)
 
-	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, cgroup)
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, sandboxChainEnv(true), cgroup)
 }
 
 // buildPastaArgs constructs the pasta command-line arguments for command mode.
@@ -815,7 +870,7 @@ func buildPastaArgs(name string, args []string, exposeTCP, exposeUDP []string) (
 // If a cgroup is requested, pasta is started inside it, so that the sandbox and the
 // network stack serving it share the same limits — and so that taking the cgroup down
 // takes pasta down with the sandbox it serves.
-func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string, cgroup Cgroup) error {
+func runPastaCommand(name string, args []string, exposeTCP, exposeUDP, env []string, cgroup Cgroup) error {
 	pastaArgs, err := buildPastaArgs(name, args, exposeTCP, exposeUDP)
 	if err != nil {
 		return err
@@ -826,7 +881,7 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP []string, 
 		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
 	}
 
-	return runSandbox(pastaPath, pastaArgs, cgroup)
+	return runSandbox(pastaPath, pastaArgs, env, cgroup)
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,
@@ -1026,7 +1081,7 @@ func buildBaseBwrapArgs(mountCurrentDir, mountCurrentDirWritable bool, mountRead
 	}
 
 	if !allEnv && !hasPath {
-		args = append(args, "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+		args = append(args, "--setenv", "PATH", defaultPath)
 	}
 
 	args = append(args,

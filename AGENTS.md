@@ -41,6 +41,33 @@ Key design: the tool constructs a `bwrap` command line with namespace isolation 
 3. **Bridge network** (`--network bridge`): pasta runs in command mode, creating user+network namespaces and running bwrap as its child (`pasta --config-net ... -- bwrap ...`). All pasta port forwarding and splice forwarding is disabled (`-t none -u none -T none -U none`) to prevent the sandbox from reaching host loopback services. DNS is handled by bind-mounting the non-stub `/run/systemd/resolve/resolv.conf` over the stub resolver. Bwrap's `--uid`/`--gid` flags explicitly map the current user's UID/GID inside the sandbox. IPv4-only mode (`-4`) is used when the host lacks IPv6 routing.
 4. **Filtered network** (`--network filtered`): pasta creates a network namespace (like bridge mode), then nftables rules inside the namespace restrict outbound traffic to only the resolved IPs of allowed hosts. Hosts are resolved at startup. Requires `nft` in PATH. Transparent to applications — no proxy configuration needed.
 
+### The environment the chain runs with
+
+Two environments are in play, and they are not the same one. The sandboxed program's is
+built out of bwrap's `--clearenv` and `--setenv` arguments in `buildBaseBwrapArgs`. The
+processes of the sandbox chain — `systemd-run`, `pasta`, `bwrap` and wrapped's own
+internal helpers between them — get theirs from `sandboxChainEnv`, which is `PATH` plus
+`chainEnvPassthrough` and nothing else. Nothing in the chain looks up anything else, so
+nothing else is handed to it, and a secret in the operator's environment cannot leak from
+a helper's `/proc/<pid>/environ` or its core dump. The reaper gets no environment at all;
+it reads a pipe, reads `/proc` and signals what it finds there.
+
+`sandboxChainEnv(true)` is the exception, and belongs to exactly those runs where bwrap
+is **not** given `--clearenv` and so passes its own environment on to the program:
+`--all-env` and `--only-network`. Passing the environment through is the point of both,
+so the whole of it has to travel down the chain. Any new run mode has to make that call
+one way or the other; getting it wrong either drops the program's environment or leaks
+the operator's.
+
+`chainEnvPassthrough` is `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`, which is how
+`systemd-run --user` finds the session bus. Dropping either is worse than it looks:
+`systemdUserBusEnv` decides whether there is a bus to be found from wrapped's *own*
+environment, so it would find the bus reachable and still hand `systemd-run` an
+environment in which it is not. `PATH` is not a nicety either — the `__nft-exec` helper
+looks `nft` up in it, and a lookup in an empty `PATH` resolves against the current
+directory, which is why an empty `PATH` and no `PATH` at all both fall back to
+`defaultPath`. Only a run that passes the environment through keeps an empty one.
+
 ### Cgroups and resource limits
 
 wrapped runs the sandbox in a transient systemd scope, i.e. a cgroup of its own, whenever it can. `buildCgroupPrefix` in `wrapped.go` turns a `Cgroup` value into a `systemd-run --user --scope --quiet --collect [--property ...] --` prefix that is placed in front of the command wrapped would otherwise have run — `bwrap` in the default mode, `pasta` in the bridge and filtered modes, so that pasta shares the sandbox's limits. `systemd-run --scope` execs its command once the scope exists, so the scope is in place before the sandbox starts.

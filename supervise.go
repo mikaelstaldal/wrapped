@@ -50,12 +50,15 @@ const scopeCgroupTimeout = 10 * time.Second
 // process holding the far end of a pipe from wrapped pulls them on wrapped's behalf
 // as soon as the pipe reports end-of-file — that is, as soon as wrapped is gone, for
 // whatever reason.
-func runSandbox(path string, args []string, cgroup Cgroup) error {
+//
+// env is the environment the whole chain runs with, from sandboxChainEnv, and not
+// wrapped's own unless the run is one that passes the environment through.
+func runSandbox(path string, args, env []string, cgroup Cgroup) error {
 	unit := ""
 	if cgroup.Mode != CgroupDisabled {
 		unit = scopeUnitName()
 	}
-	cgroupPrefix, env, err := resolveCgroupPrefix(cgroup, os.Environ(), unit)
+	cgroupPrefix, env, err := resolveCgroupPrefix(cgroup, env, unit)
 	if err != nil {
 		return err
 	}
@@ -423,6 +426,11 @@ func startReaper(pgid, startTime int) *reaper {
 		return nil
 	}
 	cmd := exec.Command(self, reapArg, strconv.Itoa(pgid), strconv.Itoa(startTime))
+	// The reaper reads a pipe, reads /proc and signals what it finds there; it looks
+	// nothing up in the environment, so it is given none. It outlives wrapped by
+	// design, and an environment it has no use for is one more copy of the operator's
+	// secrets sitting in /proc for as long as the sandbox runs.
+	cmd.Env = []string{}
 	cmd.ExtraFiles = []*os.File{readEnd}
 	cmd.Stderr = os.Stderr
 	// A session of its own puts the reaper out of reach of the signals that take
