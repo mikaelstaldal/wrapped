@@ -60,6 +60,7 @@ wrapped [flags] -- program [arguments...]
 | `--no-cgroup`               | Run the program without a cgroup of its own                                            |
 | `--cpu-limit <cpus>`        | Limit CPU usage to the given number of CPUs, e.g. `0.5` or `2` (implies `--cgroup`)    |
 | `--memory-limit <size>`     | Limit memory usage, e.g. `512M` or `2G` (implies `--cgroup`)                           |
+| `--shutdown-timeout <duration>` | Time allowed for graceful shutdown before SIGKILL (default `10s`; `0` kills immediately) |
 
 #### Network modes
 
@@ -154,6 +155,15 @@ by one of the processes above it being killed can escape; with one, they cannot.
 `--cgroup` when the program must not be able to leave anything behind, so that a machine
 that cannot provide a cgroup fails the run rather than running the program with the
 weaker lever.
+
+On `Ctrl-C` (`SIGINT`), `SIGTERM`, `SIGHUP` or `SIGQUIT`, wrapped allows the sandbox's
+remaining processes to finish for up to `--shutdown-timeout` (default `10s`) before
+forcing cleanup with `SIGKILL`. This also applies when bubblewrap's outer monitor exits
+on the signal while the program is still handling it. Cleanup finishes early once no
+live sandbox processes remain. Use, for example, `--shutdown-timeout 30s` for longer
+cleanup, or `--shutdown-timeout 0` for immediate termination. Negative durations are
+rejected. Further signals are forwarded without restarting the timeout. Ordinary exits
+and cleanup after wrapped is killed with `SIGKILL` remain immediate.
 
 The sandbox is the terminal's foreground process group while it runs, so `Ctrl-C`,
 `Ctrl-\` and `Ctrl-Z` reach the program directly. wrapped suspends and resumes along

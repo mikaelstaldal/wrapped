@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -32,6 +31,22 @@ const cgroupRoot = "/sys/fs/cgroup"
 // scopeCgroupTimeout bounds the wait for systemd to move the sandbox into the
 // transient scope. Missing it costs the cgroup lever, not the run.
 const scopeCgroupTimeout = 10 * time.Second
+
+// DefaultShutdownTimeout is the time allowed for graceful termination before SIGKILL.
+const DefaultShutdownTimeout = 10 * time.Second
+
+func gracefulShutdownTimeout(values []time.Duration) (time.Duration, error) {
+	if len(values) > 1 {
+		return 0, fmt.Errorf("expected at most one shutdown timeout")
+	}
+	if len(values) == 0 {
+		return DefaultShutdownTimeout, nil
+	}
+	if values[0] < 0 {
+		return 0, fmt.Errorf("shutdown timeout must not be negative")
+	}
+	return values[0], nil
+}
 
 // runSandbox runs the sandbox chain — bwrap, or pasta with bwrap under it, either
 // of them behind systemd-run when a cgroup is to be had — as a child process, and
@@ -53,7 +68,11 @@ const scopeCgroupTimeout = 10 * time.Second
 //
 // env is the environment the whole chain runs with, from sandboxChainEnv, and not
 // wrapped's own unless the run is one that passes the environment through.
-func runSandbox(path string, args, env []string, cgroup Cgroup) error {
+func runSandbox(path string, args, env []string, cgroup Cgroup, shutdownTimeout ...time.Duration) error {
+	timeout, err := gracefulShutdownTimeout(shutdownTimeout)
+	if err != nil {
+		return err
+	}
 	unit := ""
 	if cgroup.Mode != CgroupDisabled {
 		unit = scopeUnitName()
@@ -74,6 +93,13 @@ func runSandbox(path string, args, env []string, cgroup Cgroup) error {
 		cmdPath = cgroupPrefix[0]
 		cmdArgs = append(append(append([]string{}, cgroupPrefix[1:]...), path), args...)
 	}
+
+	// Signals aimed at wrapped are meant for the program it is running. Terminal
+	// signals do not come this way: the sandbox is the foreground process group and
+	// the terminal delivers them to it directly.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTSTP)
+	defer signal.Stop(sigCh)
 
 	// A process group of its own is what makes it possible to signal the sandbox as a
 	// whole without signalling whoever ran wrapped along with it. Setpgid makes the
@@ -121,37 +147,7 @@ func runSandbox(path string, args, env []string, cgroup Cgroup) error {
 		reaper.watch(cgroupDir)
 	}
 
-	// Signals aimed at wrapped are meant for the program it is running. Terminal
-	// signals do not come this way: the sandbox is the foreground process group and
-	// the terminal delivers them to it directly.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTSTP)
-	var forwarding sync.WaitGroup
-	forwarding.Add(1)
-	go func() {
-		defer forwarding.Done()
-		for sig := range sigCh {
-			if s, ok := sig.(syscall.Signal); ok {
-				_ = syscall.Kill(-pid, s)
-			}
-		}
-	}()
-	defer func() {
-		// Stop first, close second: signal.Stop guarantees no further sends on the
-		// channel once it has returned, so closing it is safe, and closing is what
-		// ends the loop above. Wrapped is a library call that returns now rather than
-		// replacing the process, so leaving the goroutine parked would cost a caller
-		// running one sandbox after another a goroutine and a channel per run.
-		//
-		// This is the first thing undone on the way out, so that no forwarded signal
-		// can still be on its way to a process group that terminateSandbox is about
-		// to finish with.
-		signal.Stop(sigCh)
-		close(sigCh)
-		forwarding.Wait()
-	}()
-
-	status, err := waitForSandbox(pid, terminal)
+	status, err := waitForSandbox(pid, startTime, terminal, cgroupDir, timeout, sigCh)
 	if err != nil {
 		return fmt.Errorf("failed to wait for %s: %w", filepath.Base(cmdPath), err)
 	}
@@ -165,31 +161,122 @@ func runSandbox(path string, args, env []string, cgroup Cgroup) error {
 // When the terminal stops the sandbox — Ctrl-Z — wrapped hands the terminal back and
 // stops as well, so that the shell sees one suspended job rather than a prompt it
 // cannot type at, and picks up where it left off when the job is resumed.
-func waitForSandbox(pid int, terminal *terminalHandover) (syscall.WaitStatus, error) {
-	for {
-		var status syscall.WaitStatus
-		_, err := syscall.Wait4(pid, &status, syscall.WUNTRACED|syscall.WCONTINUED, nil)
-		if errors.Is(err, syscall.EINTR) {
-			continue
-		}
-		if err != nil {
-			return 0, err
-		}
-
-		switch {
-		case status.Stopped():
-			terminal.release()
-			// Stopping wrapped itself is what tells the shell that the job is
-			// suspended. The call returns once the shell has continued wrapped.
-			_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
-			terminal.take()
-			_ = syscall.Kill(-pid, syscall.SIGCONT)
-		case status.Continued():
-			// The sandbox was continued without wrapped being asked; nothing to do.
-		default:
-			return status, nil
+func waitForSandbox(pid, startTime int, terminal *terminalHandover, cgroupDir string,
+	timeout time.Duration, signals <-chan os.Signal) (syscall.WaitStatus, error) {
+	// The outer bwrap monitor can die on Ctrl-C while the program is still handling
+	// SIGINT. Its exit is therefore not sufficient evidence that shutdown is done.
+	// Poll both the child and remaining sandbox members, ignoring zombies, which
+	// cannot do cleanup and may belong to an external reaper now.
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	var status syscall.WaitStatus
+	var exited, forced bool
+	var deadline time.Time
+	forward := func(sig os.Signal) {
+		if s, ok := sig.(syscall.Signal); ok {
+			if originalProcessGroup(pid, startTime) {
+				_ = syscall.Kill(-pid, s)
+			}
+			if isShutdownSignal(s) && deadline.IsZero() {
+				deadline = time.Now().Add(timeout)
+			}
 		}
 	}
+	for {
+		// Process a pending signal before interpreting an exit that it caused.
+		select {
+		case sig := <-signals:
+			forward(sig)
+		default:
+		}
+		if !exited {
+			var current syscall.WaitStatus
+			waited, err := syscall.Wait4(pid, &current,
+				syscall.WNOHANG|syscall.WUNTRACED|syscall.WCONTINUED, nil)
+			if err != nil && !errors.Is(err, syscall.EINTR) {
+				return 0, err
+			}
+			if waited == pid {
+				switch {
+				case current.Stopped():
+					terminal.release()
+					_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+					terminal.take()
+					_ = syscall.Kill(-pid, syscall.SIGCONT)
+				case current.Continued():
+				default:
+					status, exited = current, true
+					// Terminal signals go straight to the foreground group, so
+					// wrapped learns about them from the monitor's wait status.
+					if shutdownExit(current) && deadline.IsZero() {
+						deadline = time.Now().Add(timeout)
+					}
+				}
+			}
+		}
+		if exited && (forced || deadline.IsZero() || !sandboxRunning(cgroupDir, pid, startTime)) {
+			return status, nil
+		}
+		if !forced && !deadline.IsZero() && !time.Now().Before(deadline) {
+			terminateSandbox(cgroupDir, pid, startTime)
+			forced = true
+			continue
+		}
+		select {
+		case sig := <-signals:
+			forward(sig)
+		case <-ticker.C:
+		}
+	}
+}
+
+func isShutdownSignal(sig syscall.Signal) bool {
+	return sig == syscall.SIGINT || sig == syscall.SIGTERM || sig == syscall.SIGHUP || sig == syscall.SIGQUIT
+}
+
+func shutdownExit(status syscall.WaitStatus) bool {
+	if status.Signaled() {
+		return isShutdownSignal(status.Signal())
+	}
+	// Helpers can translate a child's signal into the shell's 128+signal code.
+	return status.Exited() && isShutdownSignal(syscall.Signal(status.ExitStatus()-128))
+}
+
+// sandboxRunning reports live members of the cgroup or the original process group.
+// Reading /proc also distinguishes zombies from processes that can still shut down.
+func sandboxRunning(cgroupDir string, pgid, startTime int) bool {
+	for _, pid := range cgroupProcs(cgroupDir) {
+		if processRunning(pid) {
+			return true
+		}
+	}
+	if !originalProcessGroup(pgid, startTime) {
+		return false
+	}
+	entries, _ := os.ReadDir("/proc")
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		fields := strings.Fields(string(data[bytes.LastIndexByte(data, ')')+1:]))
+		if len(fields) > 2 && fields[0] != "Z" && fields[0] != "X" && fields[2] == strconv.Itoa(pgid) {
+			return true
+		}
+	}
+	return false
+}
+
+func processRunning(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(data[bytes.LastIndexByte(data, ')')+1:]))
+	return len(fields) > 0 && fields[0] != "Z" && fields[0] != "X"
 }
 
 // waitStatusExitCode turns the sandbox's wait status into the exit code wrapped
@@ -230,16 +317,26 @@ const unknownStartTime = 0
 // The leader is signalled by process id as well as through the group, since a process
 // that has called setsid has left the group but is still the one wrapped started.
 func killProcessGroup(pgid, startTime int) {
-	if pgid <= 1 {
+	if !originalProcessGroup(pgid, startTime) {
 		return
-	}
-	if startTime != unknownStartTime {
-		if current, err := processStartTime(pgid); err == nil && current != startTime {
-			return
-		}
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	_ = syscall.Kill(pgid, syscall.SIGKILL)
+}
+
+// originalProcessGroup guards both cleanup and signal forwarding after the leader
+// has been reaped: surviving cgroup members may have left its original group, whose
+// id can then be reused before the graceful shutdown deadline.
+func originalProcessGroup(pgid, startTime int) bool {
+	if pgid <= 1 {
+		return false
+	}
+	if startTime != unknownStartTime {
+		if current, err := processStartTime(pgid); err == nil && current != startTime {
+			return false
+		}
+	}
+	return true
 }
 
 // processStartTime returns the time a process started, in clock ticks since boot, as
@@ -359,6 +456,9 @@ func killCgroup(dir string) {
 
 // cgroupProcs returns the ids of the processes in the cgroup subtree rooted at dir.
 func cgroupProcs(dir string) []int {
+	if dir == "" {
+		return nil
+	}
 	var pids []int
 	_ = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || !entry.IsDir() {

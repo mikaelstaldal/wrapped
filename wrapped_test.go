@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -857,4 +859,28 @@ func TestCgroupProcsRejectsAnythingButAProcessID(t *testing.T) {
 		[]byte("-1\n0\n-2\nnot-a-pid\n\n7\n"), 0o644))
 
 	assert.Equal(t, []int{7}, cgroupProcs(dir))
+}
+
+func TestGracefulShutdownTimeout(t *testing.T) {
+	timeout, err := gracefulShutdownTimeout(nil)
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Second, timeout)
+	for _, value := range []time.Duration{0, time.Millisecond, time.Minute} {
+		timeout, err := gracefulShutdownTimeout([]time.Duration{value})
+		require.NoError(t, err)
+		assert.Equal(t, value, timeout)
+	}
+	_, err = gracefulShutdownTimeout([]time.Duration{-time.Second})
+	assert.Error(t, err)
+	_, err = gracefulShutdownTimeout([]time.Duration{time.Second, time.Second})
+	assert.Error(t, err)
+}
+
+func TestShutdownExit(t *testing.T) {
+	assert.True(t, shutdownExit(syscall.WaitStatus(syscall.SIGINT)))
+	assert.True(t, shutdownExit(syscall.WaitStatus(syscall.SIGTERM)))
+	assert.True(t, shutdownExit(syscall.WaitStatus(130<<8)))
+	assert.False(t, shutdownExit(syscall.WaitStatus(0)))
+	assert.False(t, shutdownExit(syscall.WaitStatus(3<<8)))
+	assert.False(t, shutdownExit(syscall.WaitStatus(syscall.SIGKILL)))
 }

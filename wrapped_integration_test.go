@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -178,6 +179,9 @@ func buildWrappedBinary(t *testing.T) string {
 }
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__test-shutdown" {
+		os.Exit(shutdownTestHelper(os.Args[2:]))
+	}
 	// The code under test re-execs os.Executable to reach its internal helpers, which
 	// under test is this binary. Answering to them here lets the tests exercise the
 	// helpers rather than watching the test binary choke on their arguments.
@@ -1191,4 +1195,166 @@ func TestIntegrationRunSandboxReportsSignalledExit(t *testing.T) {
 	var exitErr *ExitError
 	require.ErrorAs(t, err, &exitErr)
 	assert.Equal(t, 128+int(syscall.SIGKILL), exitErr.Code)
+}
+
+// shutdownTestHelper supplies real processes without requiring namespaces. The
+// monitor has the default signal disposition, just like bwrap's outer monitor;
+// its child handles the signal and takes a moment to finish cleanup.
+func shutdownTestHelper(args []string) int {
+	switch args[0] {
+	case "run":
+		timeout, err := time.ParseDuration(args[1])
+		if err != nil {
+			return 1
+		}
+		err = runSandbox(os.Args[0], append([]string{"__test-shutdown"}, args[2:]...),
+			sandboxChainEnv(false), Cgroup{Mode: CgroupDisabled}, timeout)
+		if err != nil {
+			if exitErr, ok := err.(*ExitError); ok {
+				return exitErr.Code
+			}
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	case "monitor":
+		cmd := exec.Command(os.Args[0], append([]string{"__test-shutdown", "worker"}, args[1:]...)...)
+		if err := cmd.Run(); err != nil {
+			return 1
+		}
+	case "worker":
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(signals)
+		if err := os.WriteFile(args[1], []byte(strconv.Itoa(syscall.Getpgrp())), 0600); err != nil {
+			return 1
+		}
+		<-signals
+		time.Sleep(300 * time.Millisecond)
+		if err := os.WriteFile(args[2], []byte("cleanup finished"), 0600); err != nil {
+			return 1
+		}
+	}
+	return 0
+}
+
+func TestIntegrationGracefulShutdown(t *testing.T) {
+	requireIntegration(t)
+	requireSignals(t)
+	self, err := os.Executable()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name      string
+		monitor   bool
+		forwarded bool
+		signal    syscall.Signal
+		timeout   time.Duration
+		completed bool
+	}{
+		{"interrupt-monitor", true, false, syscall.SIGINT, 2 * time.Second, true},
+		{"terminate-monitor", true, false, syscall.SIGTERM, 2 * time.Second, true},
+		{"forwarded-interrupt", true, true, syscall.SIGINT, 2 * time.Second, true},
+		{"surviving-leader", false, true, syscall.SIGTERM, 2 * time.Second, true},
+		{"monitor-timeout", true, false, syscall.SIGINT, 100 * time.Millisecond, false},
+		{"leader-timeout", false, true, syscall.SIGTERM, 100 * time.Millisecond, false},
+		{"immediate", true, false, syscall.SIGINT, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ready, completed := filepath.Join(dir, "ready"), filepath.Join(dir, "completed")
+			mode := "worker"
+			if tc.monitor {
+				mode = "monitor"
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, self, "__test-shutdown", "run", tc.timeout.String(), mode, ready, completed)
+			cmd.Stderr = os.Stderr
+			require.NoError(t, cmd.Start())
+			t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+			waitForFile(t, ready, 3*time.Second)
+			data, err := os.ReadFile(ready)
+			require.NoError(t, err)
+			pgid, err := strconv.Atoi(string(data))
+			require.NoError(t, err)
+			require.Greater(t, pgid, 1)
+			require.NotEqual(t, syscall.Getpgrp(), pgid)
+			t.Cleanup(func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
+			if tc.forwarded {
+				require.NoError(t, cmd.Process.Signal(tc.signal))
+			} else {
+				require.NoError(t, syscall.Kill(-pgid, tc.signal))
+			}
+			started := time.Now()
+			_ = cmd.Wait()
+			require.NoError(t, ctx.Err(), "shutdown must finish within its timeout")
+			_, err = os.Stat(completed)
+			if tc.completed {
+				assert.NoError(t, err, "the program must finish its signal handler")
+			} else {
+				assert.ErrorIs(t, err, os.ErrNotExist, "SIGKILL must stop cleanup after the timeout")
+				assert.Less(t, time.Since(started), 2*time.Second)
+			}
+			assert.False(t, sandboxRunning("", pgid, unknownStartTime), "no live sandbox member may survive")
+		})
+	}
+}
+
+// Exercise the actual bwrap chain too, on hosts that support namespaces. Sending
+// SIGINT to wrapped forwards it to the same group that receives terminal Ctrl-C.
+func TestIntegrationBwrapGracefulInterrupt(t *testing.T) {
+	requireIntegration(t)
+	requireSignals(t)
+	requireBwrap(t)
+	self, err := os.Executable()
+	require.NoError(t, err)
+	for _, cgroup := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cgroup=%t", cgroup), func(t *testing.T) {
+			flag := "--no-cgroup"
+			if cgroup {
+				requireSystemdRun(t)
+				flag = "--cgroup"
+			}
+			dir := t.TempDir()
+			ready, completed := filepath.Join(dir, "ready"), filepath.Join(dir, "completed")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, buildWrappedBinary(t), flag, "--mount-writable", dir,
+				"--", self, "__test-shutdown", "worker", ready, completed)
+			cmd.Stderr = os.Stderr
+			require.NoError(t, cmd.Start())
+			t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+			waitForFile(t, ready, 10*time.Second)
+			require.NoError(t, cmd.Process.Signal(syscall.SIGINT))
+			_ = cmd.Wait()
+			require.NoError(t, ctx.Err())
+			assert.FileExists(t, completed, "bwrap exiting must not interrupt the program's cleanup")
+		})
+	}
+}
+
+// A mismatched start time models a reused group id using only a process we own.
+// Forwarding must spare that group just as forced cleanup does.
+func TestIntegrationGracefulShutdownSparesReusedProcessGroup(t *testing.T) {
+	requireIntegration(t)
+	requireSignals(t)
+	shPath := requireTool(t, "sh")
+	requireTool(t, "sleep")
+	pid, err := syscall.ForkExec(shPath, []string{shPath, "-c", "sleep 0.2"}, &syscall.ProcAttr{
+		Env: sandboxChainEnv(false),
+		Sys: &syscall.SysProcAttr{Setpgid: true},
+	})
+	require.NoError(t, err)
+	startTime, err := processStartTime(pid)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		killProcessGroup(pid, startTime)
+		var status syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &status, 0, nil)
+	})
+	signals := make(chan os.Signal, 1)
+	signals <- syscall.SIGTERM
+	status, err := waitForSandbox(pid, startTime+1, nil, "", time.Second, signals)
+	require.NoError(t, err)
+	assert.True(t, status.Exited(), "forwarding must not terminate a reused process group")
+	assert.Equal(t, 0, waitStatusExitCode(status))
 }

@@ -49,6 +49,7 @@ func main() {
 		noCgroup           bool
 		cpuLimit           string
 		memoryLimit        string
+		shutdownTimeout    time.Duration
 	)
 
 	versionStr := "dev"
@@ -91,6 +92,10 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if shutdownTimeout < 0 {
+				return fmt.Errorf("--shutdown-timeout must not be negative")
+			}
+
 			// Validate --network mode value.
 			switch networkMode {
 			case wrapped.NetworkNone, wrapped.NetworkHost, wrapped.NetworkBridge, wrapped.NetworkFiltered:
@@ -156,6 +161,7 @@ func main() {
 					CPULimit:    cpuLimit,
 					MemoryLimit: memoryLimit,
 				},
+				shutdownTimeout,
 			)
 		},
 	}
@@ -181,6 +187,8 @@ func main() {
 	f.BoolVar(&noCgroup, "no-cgroup", false, "Run the program without a cgroup of its own")
 	f.StringVar(&cpuLimit, "cpu-limit", "", "Limit CPU usage to the given number of CPUs, e.g. 0.5 or 2 (implies --cgroup)")
 	f.StringVar(&memoryLimit, "memory-limit", "", "Limit memory usage, e.g. 512M or 2G (implies --cgroup)")
+
+	f.DurationVar(&shutdownTimeout, "shutdown-timeout", wrapped.DefaultShutdownTimeout, "Graceful shutdown timeout before SIGKILL, e.g. 10s or 500ms (0 kills immediately)")
 
 	rootCmd.MarkFlagsMutuallyExclusive("current-dir", "current-dir-writable")
 	rootCmd.MarkFlagsMutuallyExclusive("only-network", "all-env")
