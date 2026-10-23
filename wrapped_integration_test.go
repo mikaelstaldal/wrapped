@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1294,13 +1295,14 @@ func TestIntegrationGracefulShutdown(t *testing.T) {
 				assert.ErrorIs(t, err, os.ErrNotExist, "SIGKILL must stop cleanup after the timeout")
 				assert.Less(t, time.Since(started), 2*time.Second)
 			}
-			assert.False(t, sandboxRunning("", pgid, unknownStartTime), "no live sandbox member may survive")
+			// Zombies may await an external reaper even after the group was killed.
+			assert.False(t, processRunningInGroup(pgid), "no live sandbox member may survive")
 		})
 	}
 }
 
-// Exercise the actual bwrap chain too, on hosts that support namespaces. Sending
-// SIGINT to wrapped forwards it to the same group that receives terminal Ctrl-C.
+// Exercise the actual bwrap chain with terminal Ctrl-C, on hosts that support
+// namespaces. Directly signalling wrapped does not cover this delivery path.
 func TestIntegrationBwrapGracefulInterrupt(t *testing.T) {
 	requireIntegration(t)
 	requireSignals(t)
@@ -1320,11 +1322,14 @@ func TestIntegrationBwrapGracefulInterrupt(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, buildWrappedBinary(t), flag, "--mount-writable", dir,
 				"--", self, "__test-shutdown", "worker", ready, completed)
-			cmd.Stderr = os.Stderr
+			master, slave := openTestTerminal(t)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
 			require.NoError(t, cmd.Start())
 			t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 			waitForFile(t, ready, 10*time.Second)
-			require.NoError(t, cmd.Process.Signal(syscall.SIGINT))
+			_, err = master.Write([]byte{3})
+			require.NoError(t, err)
 			_ = cmd.Wait()
 			require.NoError(t, ctx.Err())
 			assert.FileExists(t, completed, "bwrap exiting must not interrupt the program's cleanup")
@@ -1357,4 +1362,84 @@ func TestIntegrationGracefulShutdownSparesReusedProcessGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, status.Exited(), "forwarding must not terminate a reused process group")
 	assert.Equal(t, 0, waitStatusExitCode(status))
+}
+
+// openTestTerminal provides a real controlling terminal so tests exercise terminal
+// signal delivery rather than only wrapped's signal-forwarding path.
+func openTestTerminal(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Skipf("cannot open a pseudo-terminal: %v", err)
+	}
+	t.Cleanup(func() { _ = master.Close() })
+	var unlock int32
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), syscall.TIOCSPTLCK,
+		uintptr(unsafe.Pointer(&unlock))); errno != 0 {
+		t.Skipf("cannot unlock pseudo-terminal: %v", errno)
+	}
+	var number uint32
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), syscall.TIOCGPTN,
+		uintptr(unsafe.Pointer(&number))); errno != 0 {
+		t.Skipf("cannot find pseudo-terminal: %v", errno)
+	}
+	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", number), os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Skipf("cannot open pseudo-terminal slave: %v", err)
+	}
+	t.Cleanup(func() { _ = slave.Close() })
+	return master, slave
+}
+
+func TestIntegrationTerminalGracefulInterrupt(t *testing.T) {
+	requireIntegration(t)
+	requireSignals(t)
+	self, err := os.Executable()
+	require.NoError(t, err)
+	master, slave := openTestTerminal(t)
+	dir := t.TempDir()
+	ready, completed := filepath.Join(dir, "ready"), filepath.Join(dir, "completed")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, self, "__test-shutdown", "run", "2s", "monitor", ready, completed)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitForFile(t, ready, 3*time.Second)
+	_, err = master.Write([]byte{3}) // The terminal's Ctrl-C character.
+	require.NoError(t, err)
+	_ = cmd.Wait()
+	require.NoError(t, ctx.Err())
+	assert.FileExists(t, completed, "terminal SIGINT must allow the handler to finish")
+}
+
+// The monitor's exit must not end the grace period while its child is still
+// running. This check must work without reading that orphan's /proc entries.
+func TestIntegrationProcessGroupSurvivesMonitorExit(t *testing.T) {
+	requireIntegration(t)
+	pgid, startTime, _ := startProcessGroup(t)
+	require.NoError(t, syscall.Kill(pgid, syscall.SIGKILL))
+	var status syscall.WaitStatus
+	_, err := syscall.Wait4(pgid, &status, 0, nil)
+	require.NoError(t, err)
+	assert.True(t, processGroupRunning(pgid, startTime))
+}
+
+func processRunningInGroup(pgid int) bool {
+	entries, _ := os.ReadDir("/proc")
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		fields := strings.Fields(string(data[bytes.LastIndexByte(data, ')')+1:]))
+		if len(fields) > 2 && fields[0] != "Z" && fields[0] != "X" && fields[2] == strconv.Itoa(pgid) {
+			return true
+		}
+	}
+	return false
 }

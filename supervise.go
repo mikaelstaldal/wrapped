@@ -158,8 +158,8 @@ func waitForSandbox(pid, startTime int, terminal *terminalHandover, cgroupDir st
 	timeout time.Duration, signals <-chan os.Signal) (syscall.WaitStatus, error) {
 	// The outer bwrap monitor can die on Ctrl-C while the program is still handling
 	// SIGINT. Its exit is therefore not sufficient evidence that shutdown is done.
-	// Poll both the child and remaining sandbox members, ignoring zombies, which
-	// cannot do cleanup and may belong to an external reaper now.
+	// Poll both the child and remaining sandbox members. Without a cgroup, the
+	// group can persist until an external reaper has collected its zombies.
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	var status syscall.WaitStatus
@@ -235,38 +235,33 @@ func shutdownExit(status syscall.WaitStatus) bool {
 	return status.Exited() && isShutdownSignal(syscall.Signal(status.ExitStatus()-128))
 }
 
-// sandboxRunning reports live members of the cgroup or the original process group.
-// Reading /proc also distinguishes zombies from processes that can still shut down.
+// sandboxRunning reports live cgroup members or an existing original process group.
 func sandboxRunning(cgroupDir string, pgid, startTime int) bool {
 	for _, pid := range cgroupProcs(cgroupDir) {
 		if processRunning(pid) {
 			return true
 		}
 	}
+	return processGroupRunning(pgid, startTime)
+}
+
+// processGroupRunning uses the kernel's membership check rather than scanning
+// /proc, which can hide or deny access to some or all sandbox members. Zombies
+// may keep a group registered until their parent reaps them; the shutdown deadline
+// bounds that wait as well.
+func processGroupRunning(pgid, startTime int) bool {
 	if !originalProcessGroup(pgid, startTime) {
 		return false
 	}
-	entries, _ := os.ReadDir("/proc")
-	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-		if err != nil {
-			continue
-		}
-		fields := strings.Fields(string(data[bytes.LastIndexByte(data, ')')+1:]))
-		if len(fields) > 2 && fields[0] != "Z" && fields[0] != "X" && fields[2] == strconv.Itoa(pgid) {
-			return true
-		}
-	}
-	return false
+	// Signal zero checks existence without delivering a signal. EPERM also means
+	// the group exists, even though wrapped is not permitted to signal it.
+	return !errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
 }
 
 func processRunning(pid int) bool {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		return false
+		return !os.IsNotExist(err)
 	}
 	fields := strings.Fields(string(data[bytes.LastIndexByte(data, ')')+1:]))
 	return len(fields) > 0 && fields[0] != "Z" && fields[0] != "X"

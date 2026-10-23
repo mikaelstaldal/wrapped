@@ -102,10 +102,11 @@ profile wrapped @{wrapped_path} {
 
   # wrapped forwards these to the sandbox's process group, and takes it down
   # with kill. stp, stop and cont carry Ctrl-Z and its undoing across to a
-  # sandbox that is in a process group of its own.
+  # sandbox that is in a process group of its own. exists permits the signal-zero
+  # process-group membership check used while waiting for graceful shutdown.
   #
   # AppArmor's name for SIGTSTP is stp, not tstp; the parser rejects tstp.
-  signal (send) set=(int,term,hup,quit,kill,stp,stop,cont),
+  signal (send) set=(int,term,hup,quit,kill,stp,stop,cont,exists),
 
   include if exists <local/wrapped>
 }

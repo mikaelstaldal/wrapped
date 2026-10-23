@@ -159,11 +159,16 @@ weaker lever.
 On `Ctrl-C` (`SIGINT`), `SIGTERM`, `SIGHUP` or `SIGQUIT`, wrapped allows the sandbox's
 remaining processes to finish for up to `--shutdown-timeout` (default `10s`) before
 forcing cleanup with `SIGKILL`. This also applies when bubblewrap's outer monitor exits
-on the signal while the program is still handling it. Cleanup finishes early once no
-live sandbox processes remain. Use, for example, `--shutdown-timeout 30s` for longer
-cleanup, or `--shutdown-timeout 0` for immediate termination. Negative durations are
+on the signal while the program is still handling it. Cleanup finishes early once the
+sandbox's cgroup and process group are gone. Use, for example, `--shutdown-timeout 30s`
+for longer cleanup, or `--shutdown-timeout 0` for immediate termination. Negative durations are
 rejected. Further signals are forwarded without restarting the timeout. Ordinary exits
 and cleanup after wrapped is killed with `SIGKILL` remain immediate.
+
+Without a cgroup, wrapped checks process-group existence directly through the kernel,
+so hidden or unreadable `/proc` entries cannot cut short the grace period. Zombies can
+keep a process group registered until their parent reaps them; in that case wrapped
+may wait for the full timeout even after the program has finished.
 
 The sandbox is the terminal's foreground process group while it runs, so `Ctrl-C`,
 `Ctrl-\` and `Ctrl-Z` reach the program directly. wrapped suspends and resumes along
