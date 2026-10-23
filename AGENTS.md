@@ -85,7 +85,11 @@ Degradation is silent: no cgroup is the same run a machine without systemd has a
 
 wrapped passes `--unit` so that it knows the scope's name in advance; that is how `waitForScopeCgroup` recognises the sandbox's cgroup in `/proc/<pid>/cgroup` afterwards, which is what makes `cgroup.kill` addressable. Do not drop it.
 
-`CPUAccounting=yes` and `MemoryAccounting=yes` are always passed, so that a cgroup created without limits still measures what the program uses instead of depending on the distribution's `DefaultCPUAccounting`/`DefaultMemoryAccounting`. The two are not symmetric, and the difference has already produced one wrong test: systemd enables a controller for a unit only if the unit needs it, so `MemoryAccounting` enables the `memory` controller (giving `memory.current` and `memory.max`), while `CPUAccounting` does **not** enable the `cpu` controller, because cgroup v2 reports CPU usage in `cpu.stat` regardless. `cpu.max` therefore exists only once `--cpu-limit` is set, and its absence means unlimited.
+`MemoryAccounting=yes` is always passed so memory usage is measured regardless of the distribution's
+`DefaultMemoryAccounting` setting. It enables the `memory` controller, giving `memory.current` and `memory.max`.
+CPU usage is always reported in `cpu.stat` on cgroup v2, so do not pass `CPUAccounting=yes`: it has no effect
+and is deprecated since systemd 258. The `cpu` controller is enabled only once `--cpu-limit` is set;
+`cpu.max` is therefore absent without a CPU limit, and its absence means unlimited.
 
 `systemdUserBusEnv` resolves the session bus before running `systemd-run`, because `systemd-run --user` reports a bare `Failed to connect to bus: No medium found` (`-ENOMEDIUM` from `sd_bus_open_user`) when neither `DBUS_SESSION_BUS_ADDRESS` nor `XDG_RUNTIME_DIR` is set — which says nothing about wrapped or cgroups. When only the variables are missing, it points `XDG_RUNTIME_DIR` at the standard `/run/user/<uid>`; when there is no bus there either, it fails with an error naming the cause. This is why `buildCgroupPrefix` also returns the environment the sandbox chain must run with: both the `syscall.Exec` path and the pasta child need it.
 

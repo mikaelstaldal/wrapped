@@ -743,9 +743,9 @@ func TestBuildCgroupPrefix(t *testing.T) {
 	assert.True(t, containsSeq(prefix, "--unit", "wrapped-test.scope"))
 	// The prefix must end with the separator, so the sandbox command follows it.
 	assert.Equal(t, "--", prefix[len(prefix)-1])
-	// Accounting is always requested, so that a cgroup without limits still gets
-	// the cpu and memory controllers and the program's usage is measured.
-	assert.True(t, containsSeq(prefix, "--property", "CPUAccounting=yes"))
+	// Memory accounting needs an explicit request; CPU accounting is automatic
+	// on cgroup v2 and requesting it causes a warning on systemd 258 and later.
+	assert.False(t, containsSeq(prefix, "--property", "CPUAccounting=yes"))
 	assert.True(t, containsSeq(prefix, "--property", "MemoryAccounting=yes"))
 	// No limits requested → no limit properties.
 	for _, arg := range prefix {
