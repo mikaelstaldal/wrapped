@@ -35,17 +35,11 @@ const scopeCgroupTimeout = 10 * time.Second
 // DefaultShutdownTimeout is the time allowed for graceful termination before SIGKILL.
 const DefaultShutdownTimeout = 10 * time.Second
 
-func gracefulShutdownTimeout(values []time.Duration) (time.Duration, error) {
-	if len(values) > 1 {
-		return 0, fmt.Errorf("expected at most one shutdown timeout")
+func validateShutdownTimeout(timeout time.Duration) error {
+	if timeout < 0 {
+		return fmt.Errorf("shutdown timeout must not be negative")
 	}
-	if len(values) == 0 {
-		return DefaultShutdownTimeout, nil
-	}
-	if values[0] < 0 {
-		return 0, fmt.Errorf("shutdown timeout must not be negative")
-	}
-	return values[0], nil
+	return nil
 }
 
 // runSandbox runs the sandbox chain — bwrap, or pasta with bwrap under it, either
@@ -68,9 +62,8 @@ func gracefulShutdownTimeout(values []time.Duration) (time.Duration, error) {
 //
 // env is the environment the whole chain runs with, from sandboxChainEnv, and not
 // wrapped's own unless the run is one that passes the environment through.
-func runSandbox(path string, args, env []string, cgroup Cgroup, shutdownTimeout ...time.Duration) error {
-	timeout, err := gracefulShutdownTimeout(shutdownTimeout)
-	if err != nil {
+func runSandbox(path string, args, env []string, cgroup Cgroup, shutdownTimeout time.Duration) error {
+	if err := validateShutdownTimeout(shutdownTimeout); err != nil {
 		return err
 	}
 	unit := ""
@@ -147,7 +140,7 @@ func runSandbox(path string, args, env []string, cgroup Cgroup, shutdownTimeout 
 		reaper.watch(cgroupDir)
 	}
 
-	status, err := waitForSandbox(pid, startTime, terminal, cgroupDir, timeout, sigCh)
+	status, err := waitForSandbox(pid, startTime, terminal, cgroupDir, shutdownTimeout, sigCh)
 	if err != nil {
 		return fmt.Errorf("failed to wait for %s: %w", filepath.Base(cmdPath), err)
 	}

@@ -407,12 +407,13 @@ type Symlink struct {
 	Dest string
 }
 
-// Wrapped runs a sandbox. The optional shutdown timeout defaults to 10 seconds.
-// Zero requests immediate cleanup; negative durations and multiple values are invalid.
+// Wrapped runs a sandbox with the specified graceful shutdown timeout.
+// Use DefaultShutdownTimeout for the CLI default. Zero requests immediate cleanup;
+// negative durations are invalid.
 func Wrapped(program string, arguments []string, networkMode string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allowedHosts []string,
-	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string, unshareCgroup bool, cgroup Cgroup, shutdownTimeout ...time.Duration) error {
-	if _, err := gracefulShutdownTimeout(shutdownTimeout); err != nil {
+	networkSandboxOnly bool, allEnv bool, tmpfs []string, exposeTCP, exposeUDP []string, unshareCgroup bool, cgroup Cgroup, shutdownTimeout time.Duration) error {
+	if err := validateShutdownTimeout(shutdownTimeout); err != nil {
 		return err
 	}
 	if apparmor != "" && !validApparmorProfile.MatchString(apparmor) {
@@ -422,20 +423,20 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 	if networkSandboxOnly {
 		switch networkMode {
 		case NetworkBridge:
-			return wrappedPastaNetworkOnly(program, arguments, apparmor, exposeTCP, exposeUDP, cgroup, shutdownTimeout...)
+			return wrappedPastaNetworkOnly(program, arguments, apparmor, exposeTCP, exposeUDP, cgroup, shutdownTimeout)
 
 		case NetworkFiltered:
 			if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
 				return fmt.Errorf("--expose-tcp and --expose-udp can only be used with --network bridge")
 			}
 			return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
-				false, false, nil, nil, nil, nil, "", false, true, nil, false, cgroup, shutdownTimeout...)
+				false, false, nil, nil, nil, nil, "", false, true, nil, false, cgroup, shutdownTimeout)
 		}
 	}
 
 	if networkMode == NetworkBridge {
 		return wrappedPasta(program, arguments, mountCurrentDir, mountCurrentDirWritable,
-			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, exposeTCP, exposeUDP, unshareCgroup, cgroup, shutdownTimeout...)
+			mountReadonly, mountWritable, symlinks, extraEnv, workdir, apparmor, allEnv, tmpfs, exposeTCP, exposeUDP, unshareCgroup, cgroup, shutdownTimeout)
 	}
 
 	if networkMode == NetworkFiltered {
@@ -444,7 +445,7 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		}
 		return wrappedFilteredNft(program, arguments, apparmor, allowedHosts,
 			mountCurrentDir, mountCurrentDirWritable, mountReadonly, mountWritable,
-			symlinks, extraEnv, workdir, allEnv, false, tmpfs, unshareCgroup, cgroup, shutdownTimeout...)
+			symlinks, extraEnv, workdir, allEnv, false, tmpfs, unshareCgroup, cgroup, shutdownTimeout)
 	}
 
 	if len(exposeTCP) > 0 || len(exposeUDP) > 0 {
@@ -461,13 +462,13 @@ func Wrapped(program string, arguments []string, networkMode string, mountCurren
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
-	return runSandbox(bwrapPath, bwrapArgs, sandboxChainEnv(allEnv), cgroup, shutdownTimeout...)
+	return runSandbox(bwrapPath, bwrapArgs, sandboxChainEnv(allEnv), cgroup, shutdownTimeout)
 }
 
 func wrappedFilteredNft(program string, arguments []string, apparmor string, allowedHosts []string,
 	mountCurrentDir, mountCurrentDirWritable bool, mountReadonly, mountWritable []string,
 	symlinks []Symlink, extraEnv []string, workdir string, allEnv bool, networkSandboxOnly bool, tmpfs []string,
-	unshareCgroup bool, cgroup Cgroup, shutdownTimeout ...time.Duration) error {
+	unshareCgroup bool, cgroup Cgroup, shutdownTimeout time.Duration) error {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return fmt.Errorf("nft (nftables) is required for filtered network access: %w; install nftables via your package manager", err)
 	}
@@ -548,7 +549,7 @@ func wrappedFilteredNft(program string, arguments []string, apparmor string, all
 	}
 
 	helperArgs := append([]string{internalNftExecArg, nftScript, bwrapPath}, bwrapArgs...)
-	return runPastaCommand(self, helperArgs, nil, nil, sandboxChainEnv(allEnv || networkSandboxOnly), cgroup, shutdownTimeout...)
+	return runPastaCommand(self, helperArgs, nil, nil, sandboxChainEnv(allEnv || networkSandboxOnly), cgroup, shutdownTimeout)
 }
 
 // internalNftExecArg marks an invocation of wrapped as the internal nft helper
@@ -764,7 +765,7 @@ func hasIPv6Route() bool {
 
 func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurrentDirWritable bool,
 	mountReadonly, mountWritable []string, symlinks []Symlink, extraEnv []string, workdir, apparmor string, allEnv bool, tmpfs []string,
-	exposeTCP, exposeUDP []string, unshareCgroup bool, cgroup Cgroup, shutdownTimeout ...time.Duration) error {
+	exposeTCP, exposeUDP []string, unshareCgroup bool, cgroup Cgroup, shutdownTimeout time.Duration) error {
 	resolvedProgram, err := resolveProgram(program)
 	if err != nil {
 		return err
@@ -802,10 +803,10 @@ func wrappedPasta(program string, arguments []string, mountCurrentDir, mountCurr
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
 	}
 
-	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, sandboxChainEnv(allEnv), cgroup, shutdownTimeout...)
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, sandboxChainEnv(allEnv), cgroup, shutdownTimeout)
 }
 
-func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string, exposeTCP, exposeUDP []string, cgroup Cgroup, shutdownTimeout ...time.Duration) error {
+func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string, exposeTCP, exposeUDP []string, cgroup Cgroup, shutdownTimeout time.Duration) error {
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
 		return fmt.Errorf("failed to find bwrap: %w; install bubblewrap via your package manager", err)
@@ -830,7 +831,7 @@ func wrappedPastaNetworkOnly(program string, arguments []string, apparmor string
 	args = append(args, program)
 	args = append(args, arguments...)
 
-	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, sandboxChainEnv(true), cgroup, shutdownTimeout...)
+	return runPastaCommand(bwrapPath, args, exposeTCP, exposeUDP, sandboxChainEnv(true), cgroup, shutdownTimeout)
 }
 
 // buildPastaArgs constructs the pasta command-line arguments for command mode.
@@ -875,7 +876,7 @@ func buildPastaArgs(name string, args []string, exposeTCP, exposeUDP []string) (
 // If a cgroup is requested, pasta is started inside it, so that the sandbox and the
 // network stack serving it share the same limits — and so that taking the cgroup down
 // takes pasta down with the sandbox it serves.
-func runPastaCommand(name string, args []string, exposeTCP, exposeUDP, env []string, cgroup Cgroup, shutdownTimeout ...time.Duration) error {
+func runPastaCommand(name string, args []string, exposeTCP, exposeUDP, env []string, cgroup Cgroup, shutdownTimeout time.Duration) error {
 	pastaArgs, err := buildPastaArgs(name, args, exposeTCP, exposeUDP)
 	if err != nil {
 		return err
@@ -886,7 +887,7 @@ func runPastaCommand(name string, args []string, exposeTCP, exposeUDP, env []str
 		return fmt.Errorf("pasta is required: %w; install passt via your package manager", err)
 	}
 
-	return runSandbox(pastaPath, pastaArgs, env, cgroup, shutdownTimeout...)
+	return runSandbox(pastaPath, pastaArgs, env, cgroup, shutdownTimeout)
 }
 
 func buildBwrapArgs(program string, arguments []string, network, mountCurrentDir, mountCurrentDirWritable bool,

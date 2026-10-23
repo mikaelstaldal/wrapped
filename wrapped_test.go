@@ -203,7 +203,7 @@ func TestWrappedExposeTCPUDPRequiresBridge(t *testing.T) {
 		{NetworkFiltered, nil, []string{"123"}},
 	}
 	for _, c := range cases {
-		err := Wrapped("true", nil, c.network, false, false, nil, nil, nil, nil, "", "", nil, false, false, nil, c.tcp, c.udp, false, Cgroup{})
+		err := Wrapped("true", nil, c.network, false, false, nil, nil, nil, nil, "", "", nil, false, false, nil, c.tcp, c.udp, false, Cgroup{}, DefaultShutdownTimeout)
 		assert.ErrorContains(t, err, "--expose-tcp and --expose-udp can only be used with --network bridge", "expected error for network=%q tcp=%v udp=%v", c.network, c.tcp, c.udp)
 	}
 }
@@ -216,7 +216,7 @@ func TestWrappedRejectsInvalidApparmorProfile(t *testing.T) {
 		"foo|bar",
 	}
 	for _, name := range bad {
-		err := Wrapped("true", nil, NetworkNone, false, false, nil, nil, nil, nil, "", name, nil, false, false, nil, nil, nil, false, Cgroup{})
+		err := Wrapped("true", nil, NetworkNone, false, false, nil, nil, nil, nil, "", name, nil, false, false, nil, nil, nil, false, Cgroup{}, DefaultShutdownTimeout)
 		assert.ErrorContains(t, err, "invalid AppArmor profile name", "expected error for profile %q", name)
 	}
 }
@@ -861,19 +861,11 @@ func TestCgroupProcsRejectsAnythingButAProcessID(t *testing.T) {
 	assert.Equal(t, []int{7}, cgroupProcs(dir))
 }
 
-func TestGracefulShutdownTimeout(t *testing.T) {
-	timeout, err := gracefulShutdownTimeout(nil)
-	require.NoError(t, err)
-	assert.Equal(t, 10*time.Second, timeout)
+func TestShutdownTimeoutValidation(t *testing.T) {
 	for _, value := range []time.Duration{0, time.Millisecond, time.Minute} {
-		timeout, err := gracefulShutdownTimeout([]time.Duration{value})
-		require.NoError(t, err)
-		assert.Equal(t, value, timeout)
+		assert.NoError(t, validateShutdownTimeout(value))
 	}
-	_, err = gracefulShutdownTimeout([]time.Duration{-time.Second})
-	assert.Error(t, err)
-	_, err = gracefulShutdownTimeout([]time.Duration{time.Second, time.Second})
-	assert.Error(t, err)
+	assert.Error(t, validateShutdownTimeout(-time.Second))
 }
 
 func TestShutdownExit(t *testing.T) {
